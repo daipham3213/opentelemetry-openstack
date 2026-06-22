@@ -1,0 +1,33 @@
+# Build context is the repository root. Keep only what the image needs:
+# autoinstrumentation/requirements.txt and the instrumentation/* package
+# sources (pyproject.toml, src/, README.md required by package metadata).
+
+# VCS and tooling
+.git
+.github
+.codegraph
+.gitignore
+
+# Python caches and environments
+**/__pycache__
+**/*.py[cod]
+.venv
+**/.venv
+**/.pytest_cache
+**/.ruff_cache
+.tox
+
+# Local build artifacts
+**/dist
+**/build
+**/*.egg-info
+
+# Tests are not needed in the runtime image
+instrumentation/*/tests
+
+# Repo-level files irrelevant to the image build
+prek.toml
+tox.ini
+test-requirements.txt
+uv.lock
+README.md

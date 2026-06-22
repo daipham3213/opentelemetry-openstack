@@ -9,3 +9,5 @@ __pycache__/
 .pytest_cache/
 .idea/
 .claude/
+.codegraph/
+uv.lock
