@@ -1,0 +1,56 @@
+name: Publish to PyPI
+
+# Publishes the three OpenStack instrumentation packages to PyPI when a
+# GitHub Release is published. Uses PyPI Trusted Publishing (OIDC) — no
+# API tokens are stored. Each project must be configured on PyPI with a
+# trusted publisher pointing at this repo, this workflow file
+# (publish-pypi.yml) and the `pypi` environment.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish ${{ matrix.package }}
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/${{ matrix.package }}
+    permissions:
+      id-token: write # required for trusted publishing
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - opentelemetry-instrumentation-oslo-log
+          - opentelemetry-instrumentation-oslo-messaging
+          - opentelemetry-instrumentation-taskflow
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set version from release tag
+        if: github.event_name == 'release'
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          for pair in "oslo-log:oslo_log" "oslo-messaging:oslo_messaging" "taskflow:taskflow"; do
+            dir="${pair%%:*}"; mod="${pair##*:}"
+            echo "__version__ = \"$VERSION\"" \
+              > "instrumentation/opentelemetry-instrumentation-$dir/src/opentelemetry/instrumentation/$mod/version.py"
+          done
+          echo "Set version to $VERSION"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Build ${{ matrix.package }}
+        run: uv build --out-dir dist instrumentation/${{ matrix.package }}
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
