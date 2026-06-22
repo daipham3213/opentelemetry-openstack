@@ -1,0 +1,45 @@
+name: Bump version on release
+
+# When a GitHub Release is published, write the release version (the tag,
+# minus a leading "v") into each package's version.py and commit it back to
+# the default branch, so the repository source reflects the released version.
+#
+# This keeps the source in sync for the next development cycle. The actual
+# published artifacts get their version from the same tag at build time, in
+# publish-pypi.yml / publish-docker.yml.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    name: Bump version.py and commit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out default branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Bump version and commit
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "Bumping to $VERSION"
+          for pair in "oslo-log:oslo_log" "oslo-messaging:oslo_messaging" "taskflow:taskflow"; do
+            dir="${pair%%:*}"; mod="${pair##*:}"
+            echo "__version__ = \"$VERSION\"" \
+              > "instrumentation/opentelemetry-instrumentation-$dir/src/opentelemetry/instrumentation/$mod/version.py"
+          done
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add instrumentation/*/src/opentelemetry/instrumentation/*/version.py
+          if git diff --cached --quiet; then
+            echo "No version change to commit."
+          else
+            git commit -m "chore: bump version to $VERSION [skip ci]"
+            git push
+          fi
