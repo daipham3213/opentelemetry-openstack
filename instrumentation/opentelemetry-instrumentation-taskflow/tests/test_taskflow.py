@@ -1,5 +1,6 @@
 import pytest
-from taskflow import task
+from taskflow import engines, retry, task
+from taskflow.patterns import linear_flow
 
 from opentelemetry.instrumentation.taskflow import TaskflowInstrumentor
 from opentelemetry.sdk.trace import TracerProvider
@@ -12,19 +13,19 @@ from opentelemetry.trace import StatusCode
 
 class DemoTask(task.Task):
     def execute(self, **kwargs):
-        return kwargs.get("value", "ok")
+        return "ok"
 
-    def revert(self, *args, **kwargs):
-        return kwargs.get("result", "reverted")
+    def revert(self, **kwargs):
+        return "reverted"
 
 
 class FailingTask(task.Task):
     def execute(self, **kwargs):
-        raise ValueError(kwargs.get("message", "boom"))
+        raise ValueError("boom")
 
 
 @pytest.fixture(autouse=True)
-def uninstrument_taskflow():
+def clean_instrumentation():
     TaskflowInstrumentor().uninstrument()
     yield
     TaskflowInstrumentor().uninstrument()
@@ -36,7 +37,7 @@ def span_exporter():
 
 
 @pytest.fixture
-def instrumentor(span_exporter):
+def instrument(span_exporter):
     tracer_provider = TracerProvider()
     tracer_provider.add_span_processor(SimpleSpanProcessor(span_exporter))
 
@@ -48,11 +49,12 @@ def instrumentor(span_exporter):
     instrumentor.uninstrument()
 
 
-def assert_task_span(span, *, method, task_name, task_class="DemoTask"):
-    assert span.name == f"taskflow.task.{method}"
-    assert span.attributes["taskflow.task.class"].endswith(f".{task_class}")
-    assert span.attributes["taskflow.task.method"] == method
-    assert span.attributes["taskflow.task.name"] == task_name
+def spans_by_name(span_exporter):
+    """Index finished spans by span name."""
+    spans = {}
+    for span in span_exporter.get_finished_spans():
+        spans.setdefault(span.name, []).append(span)
+    return spans
 
 
 def test_instrumentation_dependencies():
@@ -61,74 +63,104 @@ def test_instrumentation_dependencies():
     )
 
 
-@pytest.mark.parametrize(
-    ("method", "kwargs", "expected"),
-    (
-        ("execute", {"value": "done"}, "done"),
-        ("revert", {"result": "rolled-back"}, "rolled-back"),
-    ),
-)
-def test_task_lifecycle_methods_create_spans(
-    instrumentor,
-    span_exporter,
-    method,
-    kwargs,
-    expected,
-):
-    result = getattr(DemoTask(name="demo-task"), method)(**kwargs)
-
-    spans = span_exporter.get_finished_spans()
-    assert result == expected
-    assert len(spans) == 1
-    assert_task_span(spans[0], method=method, task_name="demo-task")
-
-
-def test_subclass_overrides_are_wrapped(instrumentor, span_exporter):
-    # ``execute`` is defined on the subclass, not on ``Task`` — wrapping
-    # ``__getattribute__`` is what lets the instrumentor see it.
-    assert DemoTask(name="subclass-task").execute(value="done") == "done"
-
-    spans = span_exporter.get_finished_spans()
-    assert len(spans) == 1
-    assert_task_span(spans[0], method="execute", task_name="subclass-task")
-
-
-def test_instrument_twice_does_not_create_nested_duplicate_spans(
-    instrumentor,
-    span_exporter,
-):
-    instrumentor.instrument()
-
-    assert DemoTask(name="demo-task").execute(value="done") == "done"
-
-    spans = span_exporter.get_finished_spans()
-    assert len(spans) == 1
-    assert_task_span(spans[0], method="execute", task_name="demo-task")
-
-
-def test_uninstrument_restores_task_without_creating_spans(
-    instrumentor,
-    span_exporter,
-):
-    instrumentor.uninstrument()
-
-    result = DemoTask(name="demo-task").execute(value="done")
-
-    assert result == "done"
-    assert span_exporter.get_finished_spans() == ()
-
-
-def test_exception_is_recorded_on_span(instrumentor, span_exporter):
-    with pytest.raises(ValueError, match="boom"):
-        FailingTask(name="failing-task").execute(message="boom")
-
-    spans = span_exporter.get_finished_spans()
-    assert len(spans) == 1
-    assert_task_span(
-        spans[0],
-        method="execute",
-        task_name="failing-task",
-        task_class="FailingTask",
+def test_flow_run_creates_flow_and_task_spans(instrument, span_exporter):
+    flow = linear_flow.Flow("demo-flow").add(
+        DemoTask(name="t1"), DemoTask(name="t2")
     )
-    assert spans[0].status.status_code == StatusCode.ERROR
-    assert any(event.name == "exception" for event in spans[0].events)
+
+    engines.run(flow, engine="serial")
+
+    spans = spans_by_name(span_exporter)
+    assert "taskflow.flow.run" in spans
+    assert len(spans["taskflow.task.execute"]) == 2
+
+    flow_span = spans["taskflow.flow.run"][0]
+    assert flow_span.attributes["taskflow.flow.name"] == "demo-flow"
+    assert "taskflow.flow.uuid" in flow_span.attributes
+
+    names = set()
+    for execute_span in spans["taskflow.task.execute"]:
+        # every task span is parented to the single flow span
+        assert execute_span.parent.span_id == flow_span.context.span_id
+        assert execute_span.context.trace_id == flow_span.context.trace_id
+        assert execute_span.attributes["taskflow.task.method"] == "execute"
+        names.add(execute_span.attributes["taskflow.task.name"])
+    assert names == {"t1", "t2"}
+
+
+def test_failing_task_records_exception_and_reverts(instrument, span_exporter):
+    flow = linear_flow.Flow("failing-flow").add(
+        DemoTask(name="ok-task"), FailingTask(name="bad-task")
+    )
+
+    with pytest.raises(ValueError, match="boom"):
+        engines.run(flow, engine="serial")
+
+    spans = spans_by_name(span_exporter)
+
+    # The failing execute span carries the exception and an error status.
+    failing = next(
+        s
+        for s in spans["taskflow.task.execute"]
+        if s.attributes["taskflow.task.name"] == "bad-task"
+    )
+    assert failing.status.status_code == StatusCode.ERROR
+    assert any(event.name == "exception" for event in failing.events)
+
+    # The successful task is reverted when the flow rolls back.
+    assert "taskflow.task.revert" in spans
+    reverted = {
+        s.attributes["taskflow.task.name"]
+        for s in spans["taskflow.task.revert"]
+    }
+    assert "ok-task" in reverted
+    assert all(
+        s.attributes["taskflow.task.method"] == "revert"
+        for s in spans["taskflow.task.revert"]
+    )
+
+    # The flow span itself is marked as errored.
+    flow_span = spans["taskflow.flow.run"][0]
+    assert flow_span.status.status_code == StatusCode.ERROR
+
+
+def test_retry_controller_is_traced(instrument, span_exporter):
+    flow = linear_flow.Flow(
+        "retry-flow", retry=retry.Times(2, name="retry-1")
+    ).add(DemoTask(name="t1"))
+
+    engines.run(flow, engine="serial")
+
+    spans = spans_by_name(span_exporter)
+    assert "taskflow.retry.execute" in spans
+    retry_span = spans["taskflow.retry.execute"][0]
+    assert retry_span.attributes["taskflow.retry.name"] == "retry-1"
+    assert retry_span.attributes["taskflow.retry.method"] == "execute"
+
+    flow_span = spans["taskflow.flow.run"][0]
+    assert retry_span.parent.span_id == flow_span.context.span_id
+
+
+def test_parallel_engine_preserves_parentage(instrument, span_exporter):
+    # The listener parents atom spans by stored context, not by the ambient
+    # context of the worker thread -- so parallel execution still nests.
+    flow = linear_flow.Flow("parallel-flow").add(
+        DemoTask(name="t1"), DemoTask(name="t2")
+    )
+
+    engines.run(flow, engine="parallel", max_workers=2)
+
+    spans = spans_by_name(span_exporter)
+    flow_span = spans["taskflow.flow.run"][0]
+    assert len(spans["taskflow.task.execute"]) == 2
+    for execute_span in spans["taskflow.task.execute"]:
+        assert execute_span.parent.span_id == flow_span.context.span_id
+
+
+def test_uninstrument_stops_tracing(instrument, span_exporter):
+    instrument.uninstrument()
+
+    flow = linear_flow.Flow("demo-flow").add(DemoTask(name="t1"))
+    engines.run(flow, engine="serial")
+
+    assert span_exporter.get_finished_spans() == ()

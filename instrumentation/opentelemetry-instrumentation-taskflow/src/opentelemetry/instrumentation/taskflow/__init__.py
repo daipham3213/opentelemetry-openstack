@@ -1,17 +1,17 @@
 """OpenTelemetry instrumentation for TaskFlow.
 
-`TaskFlow <https://docs.openstack.org/taskflow/>`_ models work as *atoms* — most
-commonly :class:`~taskflow.task.Task` objects that implement an ``execute``
-method (to perform work) and an optional ``revert`` method (to roll it back when
-a flow fails). This instrumentor records every ``execute``/``revert`` call as a
-span named ``taskflow.task.<method>``, annotated with the task's class, method
-and name.
+`TaskFlow <https://docs.openstack.org/taskflow/>`_ runs *flows* of *atoms*
+(:class:`~taskflow.task.Task` and :class:`~taskflow.retry.Retry` objects) on an
+*engine*. This instrumentor records each engine execution as a root
+``taskflow.flow.run`` span and each atom ``execute``/``revert`` call as a child
+span, giving a single trace that ties an entire flow together.
 
-Concrete tasks override ``execute``/``revert``, so patching the methods on
-:class:`~taskflow.task.Task` itself would never see those overrides. Instead the
-instrumentor wraps ``Task.__getattribute__`` so that accessing either method on
-*any* Task instance returns a traced wrapper, regardless of where the method is
-defined.
+Rather than patching atom methods, the instrumentor uses TaskFlow's native
+notification API: it patches :meth:`taskflow.engines.base.Engine.__init__` so
+that every engine -- however it is constructed (``engines.run``,
+``engines.load``, a factory, or directly) -- gets an OpenTelemetry listener
+attached to its flow and atom notifiers. See
+:mod:`opentelemetry.instrumentation.taskflow.listener` for the listener itself.
 
 Usage::
 
@@ -20,103 +20,85 @@ Usage::
     TaskflowInstrumentor().instrument()
 """
 
+import logging
 from functools import wraps
+from importlib import import_module
 from typing import Collection
 
 from opentelemetry import trace
 from opentelemetry.instrumentation.instrumentor import BaseInstrumentor
 from opentelemetry.instrumentation.taskflow.version import __version__
 
-try:
-    from taskflow.task import Task
-except ImportError:
-    Task = None
+_LOG = logging.getLogger(__name__)
 
 _instruments = ("taskflow",)
-_TRACED_METHODS = frozenset(("execute", "revert"))
 
 
-def _task_attributes(task, method):
-    """Build the span attributes describing ``task`` and the called ``method``."""
-    task_type = type(task)
-    attributes = {
-        "taskflow.task.class": f"{task_type.__module__}.{task_type.__qualname__}",
-        "taskflow.task.method": method,
-    }
+def _wrap_engine_init(original, tracer):
+    """Wrap ``Engine.__init__`` to attach a trace listener to each engine."""
+    # Imported lazily so the package imports cleanly when taskflow is absent
+    # (the listener module imports taskflow at its top level).
+    listener = import_module("opentelemetry.instrumentation.taskflow.listener")
 
-    task_name = getattr(task, "name", None)
-    if task_name is not None:
-        attributes["taskflow.task.name"] = task_name
+    @wraps(original)
+    def traced_init(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        try:
+            listener.attach(self, tracer)
+        except Exception:
+            _LOG.warning(
+                "Failed to attach OpenTelemetry listener to TaskFlow engine "
+                "%r; it will not be traced",
+                self,
+                exc_info=True,
+            )
 
-    return attributes
-
-
-def _wrap_task_method(task, method_name, method, tracer):
-    """Wrap a bound task method so each call is recorded as a span."""
-
-    @wraps(method)
-    def traced_method(*args, **kwargs):
-        with tracer.start_as_current_span(
-            f"taskflow.task.{method_name}",
-            attributes=_task_attributes(task, method_name),
-            record_exception=True,
-            set_status_on_exception=True,
-        ):
-            return method(*args, **kwargs)
-
-    return traced_method
-
-
-def _wrap_getattribute(getattribute, tracer):
-    """Wrap ``Task.__getattribute__`` to trace traced-method lookups."""
-
-    def traced_getattribute(self, name):
-        attribute = getattribute(self, name)
-        if name in _TRACED_METHODS and callable(attribute):
-            return _wrap_task_method(self, name, attribute, tracer)
-        return attribute
-
-    return traced_getattribute
+    return traced_init
 
 
 class TaskflowInstrumentor(BaseInstrumentor):
-    """An instrumentor for TaskFlow task atoms.
+    """An instrumentor for TaskFlow engines."""
 
-    Args:
-        tracer_provider: ``TracerProvider`` used to obtain the tracer. Defaults
-            to the global provider.
-    """
-
-    _original_getattribute = None
+    _original_engine_init = None
 
     def instrumentation_dependencies(self) -> Collection[str]:
         return _instruments
 
     def _instrument(self, **kwargs):
-        if Task is None:
-            return  # taskflow is not available
-
-        if TaskflowInstrumentor._original_getattribute is not None:
+        if TaskflowInstrumentor._original_engine_init is not None:
             return  # already instrumented
 
+        try:
+            from taskflow.engines import base as engine_base  # noqa: PLC0415
+        except ImportError:
+            return  # taskflow is not available
+
+        tracer_provider = kwargs.get("tracer_provider")
         tracer = trace.get_tracer(
             __name__,
             __version__,
-            tracer_provider=kwargs.get("tracer_provider"),
+            tracer_provider=tracer_provider,
+            schema_url="https://opentelemetry.io/schemas/1.11.0",
         )
 
-        TaskflowInstrumentor._original_getattribute = Task.__getattribute__
-        Task.__getattribute__ = _wrap_getattribute(
-            TaskflowInstrumentor._original_getattribute,
+        TaskflowInstrumentor._original_engine_init = (
+            engine_base.Engine.__init__
+        )
+        engine_base.Engine.__init__ = _wrap_engine_init(
+            TaskflowInstrumentor._original_engine_init,
             tracer,
         )
 
     def _uninstrument(self, **kwargs):
-        if TaskflowInstrumentor._original_getattribute is None:
+        if TaskflowInstrumentor._original_engine_init is None:
             return
 
-        Task.__getattribute__ = TaskflowInstrumentor._original_getattribute
-        TaskflowInstrumentor._original_getattribute = None
+        from taskflow.engines import base as engine_base  # noqa: PLC0415
+
+        engine_base.Engine.__init__ = (
+            TaskflowInstrumentor._original_engine_init
+        )
+        TaskflowInstrumentor._original_engine_init = None
 
 
-__all__ = ["TaskflowInstrumentor", "__version__"]
+__all__ = ["TaskflowInstrumentor"]
