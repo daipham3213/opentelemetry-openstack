@@ -94,12 +94,6 @@ def inject_trace(tracer: Tracer):
         if not is_instrumentation_enabled():
             return wrapped(*args, **kwargs)
 
-        # The linkage rides on whatever span is already active in the caller;
-        # with no active span there is nothing to propagate, so leave the
-        # outgoing message untouched.
-        if not trace.get_current_span().get_span_context().is_valid:
-            return wrapped(*args, **kwargs)
-
         # Keep the original ``ctxt`` object: injection must mutate the very dict
         # that goes on the wire, so it cannot be replaced with ``or {}``.
         ctxt = _arg(args, 1, kwargs, "ctxt")
@@ -113,15 +107,16 @@ def inject_trace(tracer: Tracer):
 
         dest = f"{rpc_method} send"
         span = tracer.start_span(name=dest, kind=SpanKind.PRODUCER)
-
-        span.set_attribute(
-            messaging_attributes.MESSAGING_DESTINATION_TEMPLATE, True
-        )
-        if exchange := getattr(target, "exchange", None):
+        if span.is_recording():
             span.set_attribute(
-                messaging_attributes.MESSAGING_DESTINATION_NAME, exchange
+                messaging_attributes.MESSAGING_DESTINATION_TEMPLATE, True
             )
-        _set_rpc_attributes(span, ctxt=ctxt, method=rpc_method)
+            if exchange := getattr(target, "exchange", None):
+                span.set_attribute(
+                    messaging_attributes.MESSAGING_DESTINATION_NAME, exchange
+                )
+            _set_rpc_attributes(span, ctxt=ctxt, method=rpc_method)
+
         with trace.use_span(span, end_on_exit=True):
             # Only a mapping can carry the injected ``traceparent`` on the wire.
             if isinstance(ctxt, Mapping):
