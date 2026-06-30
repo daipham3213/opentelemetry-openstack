@@ -113,7 +113,7 @@ def test_rpc_dispatch_creates_consumer_span(instrumentor, span_exporter):
     spans = span_exporter.get_finished_spans()
     assert len(spans) == 1
     span = spans[0]
-    assert span.name == "oslo.messaging.rpc.process"
+    assert span.name == "echo receive"
     assert span.kind == SpanKind.CONSUMER
     assert span.attributes["messaging.system"] == "oslo.messaging"
     assert span.attributes["messaging.operation.name"] == "process"
@@ -133,7 +133,7 @@ def test_notification_dispatch_creates_consumer_span(
     spans = span_exporter.get_finished_spans()
     assert len(spans) == 1
     span = spans[0]
-    assert span.name == "oslo.messaging.notification.process"
+    assert span.name == "event.type receive"
     assert span.kind == SpanKind.CONSUMER
     assert span.attributes["messaging.operation.name"] == "process"
     assert (
@@ -162,7 +162,7 @@ def test_consumer_span_parents_to_producer_via_wire_context(
     consumer = next(
         s
         for s in span_exporter.get_finished_spans()
-        if s.name == "oslo.messaging.rpc.process"
+        if s.name == "echo receive"
     )
     assert consumer.parent is not None
     assert consumer.parent.trace_id == producer_ctx.trace_id
@@ -177,7 +177,7 @@ def test_rpc_dispatch_records_endpoint_exception(instrumentor, span_exporter):
 
     spans = span_exporter.get_finished_spans()
     assert len(spans) == 1
-    assert spans[0].name == "oslo.messaging.rpc.process"
+    assert spans[0].name == "boom receive"
     assert spans[0].status.status_code == StatusCode.ERROR
     assert any(event.name == "exception" for event in spans[0].events)
 
