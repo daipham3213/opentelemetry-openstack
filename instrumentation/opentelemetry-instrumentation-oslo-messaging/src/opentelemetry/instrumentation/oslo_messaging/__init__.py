@@ -27,97 +27,44 @@ producer, extracting context from the incoming message:
 Message payloads are never recorded as span attributes.
 """
 
-from logging import getLogger
-from typing import Any, Collection, Tuple
+import logging
+from importlib import import_module
+from os import environ
 
-import wrapt
+from oslo_service import backend
 
-from opentelemetry import trace
-from opentelemetry.instrumentation.instrumentor import BaseInstrumentor
-from opentelemetry.instrumentation.oslo_messaging import decorators
-from opentelemetry.instrumentation.oslo_messaging.version import __version__
-from opentelemetry.instrumentation.utils import unwrap
+_LOG = logging.getLogger(__name__)
 
-__all__ = ["OsloMessagingInstrumentor", "__version__"]
+_OSLO_SERVICE_BACKEND_MAPPING = {
+    "threading": backend.BackendType.THREADING,
+    "eventlet": backend.BackendType.EVENTLET,
+}
 
-_LOG = getLogger(__name__)
-_INSTRUMENTS = ("oslo.messaging",)
+OSLO_SERVICE_BACKEND = environ.get(
+    "OTEL_PYTHON_OSLO_SERVICE_BACKEND", "threading"
+)
 
-# (class, method_name) pairs patched via ``wrapt`` and restored with ``unwrap``.
-_WRAPPED_METHODS: Tuple[Tuple[type, str], ...] = ()
+OSLO_SERVICE_BACKEND_TYPE = _OSLO_SERVICE_BACKEND_MAPPING[OSLO_SERVICE_BACKEND]
 
-try:
-    from oslo_messaging.notify.dispatcher import NotificationDispatcher
-    from oslo_messaging.rpc.dispatcher import RPCDispatcher
-    from oslo_messaging.transport import Transport
-
-    _WRAPPED_METHODS = (
-        (Transport, "_send"),
-        (Transport, "_send_notification"),
-        (RPCDispatcher, "dispatch"),
-        (NotificationDispatcher, "dispatch"),
-    )
-except ImportError:
-    NotificationDispatcher = None
-    RPCDispatcher = None
-    Transport = None
-
-    _WRAPPED_METHODS = ()
-    _LOG.warning(
-        "oslo.messaging is not installed; oslo.messaging instrumentation "
-        "will be disabled"
+# Only select the backend if the host application has not already chosen one.
+# ``init_backend`` raises if a *different* backend is already active, and a
+# backend gets selected as a side effect of importing parts of oslo.messaging
+# (it defaults to eventlet), so blindly initializing here would break any host
+# that imported oslo.messaging first. Respect the existing choice instead.
+_current_backend = backend.get_backend_type()
+if _current_backend is None:
+    backend.init_backend(OSLO_SERVICE_BACKEND_TYPE)
+elif _current_backend != OSLO_SERVICE_BACKEND_TYPE:
+    _LOG.debug(
+        "oslo_service backend already set to %r; leaving it unchanged "
+        "(requested %r via OTEL_PYTHON_OSLO_SERVICE_BACKEND)",
+        _current_backend.value,
+        OSLO_SERVICE_BACKEND_TYPE.value,
     )
 
+instrument = import_module(
+    "opentelemetry.instrumentation.oslo_messaging.instrument"
+)
+OsloMessagingInstrumentor = instrument.OsloMessagingInstrumentor
 
-class OsloMessagingInstrumentor(BaseInstrumentor):
-    """Instrument oslo.messaging RPC and notification transports."""
-
-    def instrumentation_dependencies(self) -> Collection[str]:
-        """Return the distributions this instrumentor depends on."""
-        return _INSTRUMENTS
-
-    def _instrument(self, **kwargs: Any) -> None:
-        """Patch oslo.messaging to inject context and emit consumer spans.
-
-        :keyword tracer_provider: Optional
-            :class:`opentelemetry.trace.TracerProvider` overriding the global
-            provider.
-        """
-        if not _WRAPPED_METHODS:
-            # oslo.messaging is not available; nothing to instrument.
-            return
-
-        tracer_provider = kwargs.get("tracer_provider")
-        tracer = trace.get_tracer(
-            __name__,
-            __version__,
-            tracer_provider=tracer_provider,
-            schema_url="https://opentelemetry.io/schemas/1.11.0",
-        )
-
-        # Producer: inject trace context into the on-the-wire context dict.
-        wrapt.wrap_function_wrapper(
-            Transport,
-            "_send",
-            decorators.inject_trace(tracer),
-        )
-        wrapt.wrap_function_wrapper(
-            Transport,
-            "_send_notification",
-            decorators.inject_trace(tracer),
-        )
-
-        # Consumer: open spans parented to the producer.
-        wrapt.wrap_function_wrapper(
-            RPCDispatcher, "dispatch", decorators.rpc_server_wrapper(tracer)
-        )
-        wrapt.wrap_function_wrapper(
-            NotificationDispatcher,
-            "dispatch",
-            decorators.notification_server_wrapper(tracer),
-        )
-
-    def _uninstrument(self, **kwargs: Any) -> None:
-        """Restore all patched oslo.messaging entry points."""
-        for owner, name in _WRAPPED_METHODS:
-            unwrap(owner, name)
+__all__ = ["OsloMessagingInstrumentor"]
