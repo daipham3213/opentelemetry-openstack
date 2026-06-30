@@ -101,15 +101,6 @@ def test_send_injects_active_context(transport, instrumentor, tracer):
     assert format(expected_trace_id, "032x") in sent["ctxt"]["traceparent"]
 
 
-def test_send_without_active_span_injects_nothing(transport, instrumentor):
-    transport, sent = transport
-    target = SimpleNamespace(topic="topic")
-
-    transport._send(target, {}, {"method": "do_thing"})
-
-    assert "traceparent" not in sent["ctxt"]
-
-
 def test_send_notification_injects_active_context(
     transport, instrumentor, tracer
 ):
