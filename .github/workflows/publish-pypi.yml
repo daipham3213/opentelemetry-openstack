@@ -1,10 +1,16 @@
-name: Publish to PyPI
+name: Publish release artifacts
 
-# Publishes the three OpenStack instrumentation packages to PyPI when a
-# GitHub Release is published. Uses PyPI Trusted Publishing (OIDC) — no
-# API tokens are stored. Each project must be configured on PyPI with a
-# trusted publisher pointing at this repo, this workflow file
-# (publish-pypi.yml) and the `pypi` environment.
+# When a GitHub Release is published this workflow:
+#   1. Publishes the three OpenStack instrumentation packages to PyPI using
+#      Trusted Publishing (OIDC) — no API tokens are stored. Each project must
+#      be configured on PyPI with a trusted publisher pointing at this repo,
+#      this workflow file (publish-pypi.yml) and the `pypi` environment.
+#   2. Builds the auto-instrumentation Docker image and pushes it to Docker Hub,
+#      but only after every PyPI publish has succeeded (see `needs: publish`).
+#
+# Required repository secrets for the Docker step:
+#   DOCKERHUB_USERNAME - Docker Hub account / org name
+#   DOCKERHUB_TOKEN    - Docker Hub access token (Account Settings > Security)
 on:
   release:
     types: [published]
@@ -12,6 +18,9 @@ on:
 
 permissions:
   contents: read
+
+env:
+  IMAGE: daipham3213/otel-autoinstrumentation-openstack
 
 jobs:
   publish:
@@ -54,3 +63,54 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
+
+  docker:
+    name: Build and push image
+    # Only build the image once every package has been published to PyPI.
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set version from release tag
+        if: github.event_name == 'release'
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          for pair in "oslo-log:oslo_log" "oslo-messaging:oslo_messaging" "taskflow:taskflow"; do
+            dir="${pair%%:*}"; mod="${pair##*:}"
+            echo "__version__ = \"$VERSION\"" \
+              > "instrumentation/opentelemetry-instrumentation-$dir/src/opentelemetry/instrumentation/$mod/version.py"
+          done
+          echo "Set version to $VERSION"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: autoinstrumentation/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

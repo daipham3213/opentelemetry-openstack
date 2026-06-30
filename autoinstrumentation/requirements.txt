@@ -63,6 +63,6 @@ opentelemetry-instrumentation-urllib==0.63b1
 opentelemetry-instrumentation-urllib3==0.63b1
 opentelemetry-instrumentation-wsgi==0.63b1
 
-# OpenStack specific instrumentations are local packages in this repo
-# (instrumentation/*) and are not published to PyPI. They are installed from
-# source in the Dockerfile, so they are intentionally not listed here.
+opentelemetry-instrumentation-oslo-log
+opentelemetry-instrumentation-oslo-messaging
+opentelemetry-instrumentation-taskflow
