@@ -109,19 +109,26 @@ def inject_trace(tracer: Tracer):
         if not trace.get_current_span().get_span_context().is_valid:
             return wrapped(*args, **kwargs)
 
-        ctxt = _arg(args, 1, kwargs, "ctxt")
-        method = _arg(args, 2, kwargs, "method")
+        ctxt = _arg(args, 1, kwargs, "ctxt") or {}
+        method = _arg(args, 2, kwargs, "method") or {}
+        target = _arg(args, 0, kwargs, "target")
 
-        rpc_method = (
-            method.get("method") if isinstance(method, Mapping) else None
-        )
+        rpc_method = method.get("method")
+        namespace = method.get("namespace")
+        if namespace:
+            rpc_method = f"{namespace}.{rpc_method}"
+
         dest = f"{rpc_method} send"
         span = tracer.start_span(name=dest, kind=SpanKind.PRODUCER)
-        _set_rpc_attributes(span, ctxt=ctxt, method=rpc_method)
 
         span.set_attribute(
             messaging_attributes.MESSAGING_DESTINATION_TEMPLATE, True
         )
+        span.set_attribute(
+            messaging_attributes.MESSAGING_DESTINATION_NAME,
+            getattr(target, "exchange", None),
+        )
+        _set_rpc_attributes(span, ctxt=ctxt, method=rpc_method)
         with trace.use_span(span, end_on_exit=True):
             # Only a mapping can carry the injected ``traceparent`` on the wire.
             if isinstance(ctxt, Mapping):
@@ -217,10 +224,13 @@ def rpc_server_wrapper(tracer: Tracer) -> Wrapper:
 
         token = context.attach(span_ctx)
 
-        rpc_method = message.get("method")
-        dest = f"{MESSAGING_SYSTEM}.rpc.{_OP_PROCESS}"
-        span = tracer.start_span(name=dest, kind=SpanKind.CONSUMER)
+        rpc_method = message.get("method", "")
+        namespace = message.get("namespace", "")
+        if namespace:
+            rpc_method = f"{namespace}.{rpc_method}"
+        dest = f"{rpc_method} {MessagingOperationValues.RECEIVE.value}"
 
+        span = tracer.start_span(name=dest, kind=SpanKind.CONSUMER)
         _set_rpc_attributes(span, ctxt=ctxt, method=rpc_method)
         if message_id := message.get("msg_id"):
             span.set_attribute(
