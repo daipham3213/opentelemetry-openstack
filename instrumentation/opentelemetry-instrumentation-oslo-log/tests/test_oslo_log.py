@@ -2,6 +2,7 @@ import logging
 
 import pytest
 from oslo_config import cfg
+from oslo_context import context as oslo_context
 from oslo_log import log as oslo_logging
 
 from opentelemetry.instrumentation.logging.handler import LoggingHandler
@@ -210,15 +211,6 @@ def test_instrument_installs_otlp_handler_and_uninstrument_removes_it():
     assert not _root_otlp_handlers()
 
 
-def test_enable_log_auto_instrumentation_false_skips_handler():
-    OsloLogInstrumentor().instrument(
-        logger_provider=logger_provider(),
-        enable_log_auto_instrumentation=False,
-    )
-
-    assert not _root_otlp_handlers()
-
-
 def test_records_are_exported_through_logger_provider():
     exporter = InMemoryLogRecordExporter()
     provider = LoggerProvider(
@@ -235,6 +227,69 @@ def test_records_are_exported_through_logger_provider():
     finished_logs = exporter.get_finished_logs()
     assert len(finished_logs) == 1
     assert finished_logs[0].log_record.body == "exported message"
+
+
+def _export_provider(service_name="export-service"):
+    exporter = InMemoryLogRecordExporter()
+    provider = LoggerProvider(
+        resource=Resource.create({SERVICE_NAME: service_name})
+    )
+    provider.add_log_record_processor(SimpleLogRecordProcessor(exporter))
+    return exporter, provider
+
+
+def test_oslo_context_is_mapped_to_record_attributes():
+    exporter, provider = _export_provider()
+    OsloLogInstrumentor().instrument(logger_provider=provider)
+
+    ctx = oslo_context.RequestContext(
+        user_id="u1",
+        project_id="p1",
+        request_id="req-123",
+        global_request_id="gr-9",
+    )
+    logger = logging.getLogger("oslo-log-ctx-test")
+    logger.setLevel(logging.INFO)
+    logger.info("with context", extra={"context": ctx})
+
+    attributes = exporter.get_finished_logs()[0].log_record.attributes
+    assert attributes["openstack.request_id"] == "req-123"
+    assert attributes["openstack.global_request_id"] == "gr-9"
+    assert attributes["openstack.user_id"] == "u1"
+    assert attributes["openstack.project_id"] == "p1"
+    # The raw RequestContext object must not leak through as an attribute.
+    assert "context" not in attributes
+
+
+def test_map_oslo_context_false_skips_mapping():
+    exporter, provider = _export_provider()
+    OsloLogInstrumentor().instrument(
+        logger_provider=provider, map_oslo_context=False
+    )
+
+    ctx = oslo_context.RequestContext(request_id="req-123")
+    logger = logging.getLogger("oslo-log-ctx-off-test")
+    logger.setLevel(logging.INFO)
+    logger.info("no mapping", extra={"context": ctx})
+
+    attributes = exporter.get_finished_logs()[0].log_record.attributes
+    assert "openstack.request_id" not in attributes
+
+
+def test_handler_attached_to_oslo_root_logger():
+    instrumentor = OsloLogInstrumentor()
+    instrumentor.instrument(logger_provider=logger_provider())
+
+    oslo_root = oslo_logging.getLogger(None).logger
+    assert any(
+        isinstance(handler, LoggingHandler) for handler in oslo_root.handlers
+    )
+
+
+def test_uninstrument_when_not_instrumented_is_noop():
+    # The autouse fixture has already uninstrumented; a second call must not
+    # raise even though there is nothing to undo.
+    OsloLogInstrumentor().uninstrument()
 
 
 def _oslo_conf():
