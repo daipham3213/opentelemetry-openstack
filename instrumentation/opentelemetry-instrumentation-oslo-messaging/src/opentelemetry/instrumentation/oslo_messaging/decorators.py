@@ -24,11 +24,9 @@ failure modes and the wrapped callable is always invoked. Exceptions raised by
 the wrapped callable propagate unchanged and are recorded on the active span.
 """
 
-import logging
 from typing import Any, Callable, Mapping, Optional
 
 from opentelemetry import context, propagate, trace
-from opentelemetry.context import Context
 from opentelemetry.instrumentation.utils import is_instrumentation_enabled
 from opentelemetry.semconv._incubating.attributes import (
     messaging_attributes,
@@ -44,8 +42,6 @@ __all__ = [
     "notification_server_wrapper",
 ]
 
-_LOG = logging.getLogger(__name__)
-
 #: ``messaging.system`` / ``rpc.system`` value identifying this transport.
 MESSAGING_SYSTEM = "oslo.messaging"
 
@@ -56,11 +52,6 @@ ATTR_NOTIFICATION_PUBLISHER_ID = "oslo_messaging.notification.publisher_id"
 
 # Operation name recorded under ``messaging.operation.name`` for consumer spans.
 _OP_PROCESS = "process"
-
-# Narrow failure modes for attribute/dict access. Catching these (rather than a
-# broad ``Exception``) keeps real bugs visible while ensuring a malformed
-# message can never break the host application's messaging path.
-_EXTRACTION_ERRORS = (AttributeError, KeyError, TypeError, IndexError)
 
 WrappedFn = Callable[..., Any]
 Wrapper = Callable[[WrappedFn, Any, tuple, dict], Any]
@@ -109,7 +100,9 @@ def inject_trace(tracer: Tracer):
         if not trace.get_current_span().get_span_context().is_valid:
             return wrapped(*args, **kwargs)
 
-        ctxt = _arg(args, 1, kwargs, "ctxt") or {}
+        # Keep the original ``ctxt`` object: injection must mutate the very dict
+        # that goes on the wire, so it cannot be replaced with ``or {}``.
+        ctxt = _arg(args, 1, kwargs, "ctxt")
         method = _arg(args, 2, kwargs, "method") or {}
         target = _arg(args, 0, kwargs, "target")
 
@@ -124,10 +117,10 @@ def inject_trace(tracer: Tracer):
         span.set_attribute(
             messaging_attributes.MESSAGING_DESTINATION_TEMPLATE, True
         )
-        span.set_attribute(
-            messaging_attributes.MESSAGING_DESTINATION_NAME,
-            getattr(target, "exchange", None),
-        )
+        if exchange := getattr(target, "exchange", None):
+            span.set_attribute(
+                messaging_attributes.MESSAGING_DESTINATION_NAME, exchange
+            )
         _set_rpc_attributes(span, ctxt=ctxt, method=rpc_method)
         with trace.use_span(span, end_on_exit=True):
             # Only a mapping can carry the injected ``traceparent`` on the wire.
@@ -137,19 +130,6 @@ def inject_trace(tracer: Tracer):
         return result
 
     return inject_wrapper
-
-
-def _remote_context(carrier: Any) -> Optional[Context]:
-    """Extract the producer's trace context from an incoming wire context.
-
-    :param carrier: The ``ctxt`` mapping carried with an incoming message.
-
-    :returns: The extracted context to use as the consumer span's parent, or
-        ``None`` if the carrier is not a mapping (no context to extract).
-    """
-    if isinstance(carrier, Mapping):
-        return propagate.extract(carrier)
-    return None
 
 
 def _set_rpc_attributes(span: Span, ctxt: dict, method: Optional[str]) -> None:
@@ -255,8 +235,9 @@ def rpc_server_wrapper(tracer: Tracer) -> Wrapper:
 def notification_server_wrapper(tracer: Tracer) -> Wrapper:
     """Build a wrapper for ``NotificationDispatcher.dispatch`` (consumer side).
 
-    Produces an ``oslo.messaging.notification.process`` (``CONSUMER``) span
-    parented to the producer's span. The payload is never recorded.
+    Produces a ``"<event_type> receive"`` (``CONSUMER``) span parented to the
+    producer's span via the context carried on ``incoming.ctxt``. The span is
+    scoped to the dispatch call. The payload is never recorded.
 
     .. note::
 
@@ -269,7 +250,6 @@ def notification_server_wrapper(tracer: Tracer) -> Wrapper:
     :returns: A ``wrapt``-style wrapper
         ``(wrapped, instance, args, kwargs) -> Any``.
     """
-    span_name = f"{MESSAGING_SYSTEM}.notification.{_OP_PROCESS}"
 
     def wrapper(
         wrapped: WrappedFn, instance: Any, args: tuple, kwargs: dict
@@ -278,27 +258,42 @@ def notification_server_wrapper(tracer: Tracer) -> Wrapper:
             return wrapped(*args, **kwargs)
 
         incoming = _arg(args, 0, kwargs, "incoming")
-        ctxt = getattr(incoming, "ctxt", None)
+        ctxt = getattr(incoming, "ctxt", None) or {}
         message = getattr(incoming, "message", None) or {}
         if not isinstance(message, Mapping):
             message = {}
 
-        with tracer.start_as_current_span(
-            span_name, context=_remote_context(ctxt), kind=SpanKind.CONSUMER
-        ) as span:
-            if span.is_recording():
-                try:
-                    _set_notification_attributes(
-                        span,
-                        event_type=message.get("event_type"),
-                        priority=message.get("priority"),
-                        publisher_id=message.get("publisher_id"),
-                    )
-                except _EXTRACTION_ERRORS:  # pragma: no cover - defensive
-                    _LOG.debug(
-                        "failed to set notification server span attributes",
-                        exc_info=True,
-                    )
-            return wrapped(*args, **kwargs)
+        span_ctx = propagate.extract(ctxt)
+        if not span_ctx:
+            span_ctx = context.get_current()
+
+        token = context.attach(span_ctx)
+
+        event_type = message.get("event_type", "")
+        dest = f"{event_type} {MessagingOperationValues.RECEIVE.value}"
+
+        span = tracer.start_span(name=dest, kind=SpanKind.CONSUMER)
+        _set_notification_attributes(
+            span,
+            event_type=message.get("event_type"),
+            priority=message.get("priority"),
+            publisher_id=message.get("publisher_id"),
+        )
+        if message_id := message.get("message_id"):
+            span.set_attribute(
+                messaging_attributes.MESSAGING_MESSAGE_ID, message_id
+            )
+
+        span.set_attribute(
+            messaging_attributes.MESSAGING_OPERATION,
+            MessagingOperationValues.RECEIVE.value,
+        )
+
+        with trace.use_span(span, end_on_exit=True):
+            result = wrapped(*args, **kwargs)
+
+        if token:
+            context.detach(token)
+        return result
 
     return wrapper
