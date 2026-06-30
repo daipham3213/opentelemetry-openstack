@@ -13,7 +13,7 @@ FROM python:3.14@sha256:5c485439db26ba10745100656f6712d662075edb7ec6861dda715bcd
 
 WORKDIR /operator-build
 
-ADD requirements.txt .
+ADD autoinstrumentation/requirements.txt .
 
 RUN mkdir workspace && pip install --target workspace -r requirements.txt
 
@@ -21,7 +21,7 @@ FROM python:3.14-alpine@sha256:26730869004e2b9c4b9ad09cab8625e81d256d1ce97e72df5
 
 WORKDIR /operator-build
 
-ADD requirements.txt .
+ADD autoinstrumentation/requirements.txt .
 
 RUN apk add gcc python3-dev musl-dev linux-headers
 RUN mkdir workspace && pip install --target workspace -r requirements.txt
