@@ -12,6 +12,7 @@ dependencies = [
     "opentelemetry-instrumentation-oslo-log",
     "opentelemetry-instrumentation-oslo-messaging",
     "opentelemetry-instrumentation-taskflow",
+    "opentelemetry-instrumentation-openstacksdk",
 ]
 
 [dependency-groups]
@@ -31,6 +32,7 @@ required-version = ">=0.6.0"
 opentelemetry-instrumentation-oslo-log = { workspace = true }
 opentelemetry-instrumentation-oslo-messaging = { workspace = true }
 opentelemetry-instrumentation-taskflow = { workspace = true }
+opentelemetry-instrumentation-openstacksdk = { workspace = true }
 
 [tool.uv.workspace]
 members = [
