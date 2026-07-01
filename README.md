@@ -11,6 +11,9 @@ A monorepo for OpenTelemetry instrumentation packages targeting OpenStack-relate
   the active trace context.
 - `opentelemetry-instrumentation-oslo-messaging` — propagates trace context
   across `oslo.messaging` RPC and notifications and records consumer spans.
+- `opentelemetry-instrumentation-openstacksdk` — records a `CLIENT` span for
+  every OpenStack SDK REST call (wrapping `openstack.proxy.Proxy.request`) and
+  injects trace context into the outgoing request headers.
 
 ## Auto-instrumentation image
 
@@ -20,7 +23,7 @@ The repository also publishes a Python auto-instrumentation image,
 drop-in replacement for the upstream
 [`autoinstrumentation-python`](https://github.com/open-telemetry/opentelemetry-operator#opentelemetry-auto-instrumentation-injection)
 image: it bundles `opentelemetry-distro`, the standard contrib
-instrumentations, **and** the three OpenStack packages above, so OpenStack
+instrumentations, **and** the four OpenStack packages above, so OpenStack
 services get traced without changing the application image.
 
 Tags follow the release version (`{{version}}`, `{{major}}.{{minor}}`,
@@ -78,6 +81,7 @@ Run a single package's tests:
 tox -e taskflow
 tox -e oslo.log
 tox -e oslo.messaging
+tox -e openstacksdk
 ```
 
 Run every package's tests:

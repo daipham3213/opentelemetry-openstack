@@ -1,0 +1,50 @@
+[project]
+name = "opentelemetry-instrumentation-openstacksdk"
+description = "OpenStack SDK (openstacksdk) instrumentation for OpenTelemetry"
+readme = "README.md"
+authors = [
+    { name = "Pham Le Gia Dai", email = "daipham3213@gmail.com" }
+]
+requires-python = ">=3.10"
+dynamic = ["version"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+dependencies = [
+    "opentelemetry-api",
+    "opentelemetry-instrumentation",
+    "opentelemetry-semantic-conventions",
+]
+
+[project.optional-dependencies]
+instruments = [
+    "openstacksdk"
+]
+
+[project.entry-points.opentelemetry_instrumentor]
+openstacksdk = "opentelemetry.instrumentation.openstacksdk:OpenStackSDKInstrumentor"
+
+[tool.hatch.version]
+path = "src/opentelemetry/instrumentation/openstacksdk/version.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/opentelemetry"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
