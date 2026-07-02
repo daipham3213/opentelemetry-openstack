@@ -31,35 +31,41 @@ import logging
 from importlib import import_module
 from os import environ
 
-from oslo_service import backend
-
 _LOG = logging.getLogger(__name__)
 
-_OSLO_SERVICE_BACKEND_MAPPING = {
-    "threading": backend.BackendType.THREADING,
-    "eventlet": backend.BackendType.EVENTLET,
-}
+try:
+    from oslo_service import backend
 
-OSLO_SERVICE_BACKEND = environ.get(
-    "OTEL_PYTHON_OSLO_SERVICE_BACKEND", "threading"
-)
+    _OSLO_SERVICE_BACKEND_MAPPING = {
+        "threading": backend.BackendType.THREADING,
+        "eventlet": backend.BackendType.EVENTLET,
+    }
 
-OSLO_SERVICE_BACKEND_TYPE = _OSLO_SERVICE_BACKEND_MAPPING[OSLO_SERVICE_BACKEND]
+    OSLO_SERVICE_BACKEND = environ.get(
+        "OTEL_PYTHON_OSLO_SERVICE_BACKEND", "threading"
+    )
 
-# Only select the backend if the host application has not already chosen one.
-# ``init_backend`` raises if a *different* backend is already active, and a
-# backend gets selected as a side effect of importing parts of oslo.messaging
-# (it defaults to eventlet), so blindly initializing here would break any host
-# that imported oslo.messaging first. Respect the existing choice instead.
-_current_backend = backend.get_backend_type()
-if _current_backend is None:
-    backend.init_backend(OSLO_SERVICE_BACKEND_TYPE)
-elif _current_backend != OSLO_SERVICE_BACKEND_TYPE:
+    OSLO_SERVICE_BACKEND_TYPE = _OSLO_SERVICE_BACKEND_MAPPING[OSLO_SERVICE_BACKEND]
+
+    # Only select the backend if the host application has not already chosen one.
+    # ``init_backend`` raises if a *different* backend is already active, and a
+    # backend gets selected as a side effect of importing parts of oslo.messaging
+    # (it defaults to eventlet), so blindly initializing here would break any host
+    # that imported oslo.messaging first. Respect the existing choice instead.
+    _current_backend = backend.get_backend_type()
+    if _current_backend is None:
+        backend.init_backend(OSLO_SERVICE_BACKEND_TYPE)
+    elif _current_backend != OSLO_SERVICE_BACKEND_TYPE:
+        _LOG.debug(
+            "oslo_service backend already set to %r; leaving it unchanged "
+            "(requested %r via OTEL_PYTHON_OSLO_SERVICE_BACKEND)",
+            _current_backend.value,
+            OSLO_SERVICE_BACKEND_TYPE.value,
+        )
+except ImportError:
     _LOG.debug(
-        "oslo_service backend already set to %r; leaving it unchanged "
-        "(requested %r via OTEL_PYTHON_OSLO_SERVICE_BACKEND)",
-        _current_backend.value,
-        OSLO_SERVICE_BACKEND_TYPE.value,
+        "oslo_service.backend unavailable (oslo.service < 4.1.0); "
+        "skipping backend selection - span instrumentation still active"
     )
 
 instrument = import_module(
