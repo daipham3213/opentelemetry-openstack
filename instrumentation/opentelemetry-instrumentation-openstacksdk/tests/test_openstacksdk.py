@@ -85,8 +85,9 @@ def test_request_creates_client_span(instrument, span_exporter):
     proxy_obj = _make_proxy()
     with mock.patch.object(
         adapter.Adapter, "request", return_value=_fake_response(202)
-    ):
+    ) as mock_req:
         resp = proxy_obj.request("/servers", "GET")
+        assert mock_req.call_count == 1
 
     assert resp.status_code == 202
 
