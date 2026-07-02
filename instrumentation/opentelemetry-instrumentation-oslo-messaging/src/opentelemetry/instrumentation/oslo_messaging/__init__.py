@@ -45,7 +45,9 @@ try:
         "OTEL_PYTHON_OSLO_SERVICE_BACKEND", "threading"
     )
 
-    OSLO_SERVICE_BACKEND_TYPE = _OSLO_SERVICE_BACKEND_MAPPING[OSLO_SERVICE_BACKEND]
+    OSLO_SERVICE_BACKEND_TYPE = _OSLO_SERVICE_BACKEND_MAPPING[
+        OSLO_SERVICE_BACKEND
+    ]
 
     # Only select the backend if the host application has not already chosen one.
     # ``init_backend`` raises if a *different* backend is already active, and a
