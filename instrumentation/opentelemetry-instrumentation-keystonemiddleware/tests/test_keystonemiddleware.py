@@ -274,9 +274,11 @@ def test_call_opens_request_span_with_nested_auth(instrument, span_exporter):
     assert body == b"{}"
 
     spans = {s.name: s for s in span_exporter.get_finished_spans()}
-    request = spans["keystonemiddleware.request"]
+    request = spans["GET /v3/servers"]
     auth = spans["keystonemiddleware.authenticate"]
 
+    # The request span is named after the action (method + path).
+    assert request.name == "GET /v3/servers"
     # No inbound context -> the request span is the SERVER entry point.
     assert request.kind == SpanKind.SERVER
     assert request.attributes["http.request.method"] == "GET"
@@ -304,7 +306,7 @@ def test_call_continues_inbound_trace(instrument, span_exporter):
     )
 
     request = {s.name: s for s in span_exporter.get_finished_spans()}[
-        "keystonemiddleware.request"
+        "GET /v3/servers"
     ]
     assert request.kind == SpanKind.SERVER
     assert format(request.context.trace_id, "032x") == trace_id
@@ -325,7 +327,7 @@ def test_call_scopes_downstream_handler_work(
     _wsgi_call(service, **{"X-Auth-Token": "TOKENID"})
 
     spans = {s.name: s for s in span_exporter.get_finished_spans()}
-    request = spans["keystonemiddleware.request"]
+    request = spans["GET /v3/servers"]
     work = spans["handler.work"]
     # The gap this closes: handler work shares the request's trace, nested
     # under the request span rather than starting a disconnected one.
@@ -343,7 +345,7 @@ def test_call_nested_under_active_span_is_internal(
         _wsgi_call(service, **{"X-Auth-Token": "TOKENID"})
 
     spans = {s.name: s for s in span_exporter.get_finished_spans()}
-    request = spans["keystonemiddleware.request"]
+    request = spans["GET /v3/servers"]
     server = spans["wsgi.server"]
     # An outer server span already exists -> don't open a second one.
     assert request.kind == SpanKind.INTERNAL
@@ -355,7 +357,7 @@ def test_call_server_error_sets_span_error(instrument, span_exporter):
     _wsgi_call(service, **{"X-Auth-Token": "TOKENID"})
 
     request = {s.name: s for s in span_exporter.get_finished_spans()}[
-        "keystonemiddleware.request"
+        "GET /v3/servers"
     ]
     assert request.attributes["http.response.status_code"] == 500
     assert request.status.status_code == StatusCode.ERROR
@@ -366,7 +368,7 @@ def test_call_client_error_not_span_error(instrument, span_exporter):
     _wsgi_call(service, **{"X-Auth-Token": "TOKENID"})
 
     request = {s.name: s for s in span_exporter.get_finished_spans()}[
-        "keystonemiddleware.request"
+        "GET /v3/servers"
     ]
     assert request.attributes["http.response.status_code"] == 404
     # A 4xx is the caller's fault, not a server error.

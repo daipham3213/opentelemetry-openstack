@@ -121,6 +121,24 @@ def _http_method(args: Tuple[Any, ...], kwargs: Mapping[str, Any]) -> str:
     return (method or "").upper()
 
 
+def _url_path(url: str) -> str:
+    """Return the path component of a requested URL, for the span name.
+
+    ``url`` may be a bare path (``/servers``) or a fully qualified URL
+    (``https://host/v2.1/servers``); in both cases ``urlparse().path`` yields
+    the path used to describe the action (e.g. ``GET /servers``). A host-only
+    URL has no path, so this returns ``""`` and the caller falls back to the
+    bare method.
+
+    Args:
+        url: The URL (or path) the request targets.
+
+    Returns:
+        The path component, or an empty string when there is none.
+    """
+    return urlparse(url).path
+
+
 def _service_type(kwargs: Mapping[str, Any]) -> Optional[str]:
     """Resolve the target ``service_type`` from a ``Session.request`` call.
 
@@ -240,7 +258,10 @@ def _request_wrapper(tracer: Tracer) -> Wrapper:
         service_type: Optional[str] = _service_type(kwargs)
         request_id: Optional[str] = kwargs.get("global_request_id")
 
-        span_name: str = f"{method} {service_type}" if service_type else method
+        # Name the span after the action, e.g. ``GET /servers``, falling back to
+        # the bare method when no path is available.
+        path: str = _url_path(url)
+        span_name: str = f"{method} {path}" if path else method
 
         attributes: Attributes = {
             http_attributes.HTTP_REQUEST_METHOD: method,

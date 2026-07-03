@@ -88,7 +88,7 @@ def test_request_creates_client_span(instrument, span_exporter):
     assert len(spans) == 1
     span = spans[0]
 
-    assert span.name == "GET compute"
+    assert span.name == "GET /v2.1/servers"
     assert span.kind == SpanKind.CLIENT
     assert span.attributes["http.request.method"] == "GET"
     assert span.attributes["http.response.status_code"] == 202
@@ -100,19 +100,35 @@ def test_request_creates_client_span(instrument, span_exporter):
     assert span.status.status_code == StatusCode.UNSET
 
 
-def test_request_without_endpoint_filter_names_by_method(
-    instrument, span_exporter
-):
+def test_request_named_by_method_and_path(instrument, span_exporter):
     session = ks_session.Session()
     with mock.patch.object(
         ks_session.Session, "_send_request", return_value=_fake_response()
     ):
-        _request(session)
+        # A token/discovery request goes to a fully qualified URL with no
+        # endpoint_filter: the span is named by method + path, and carries no
+        # service_type attribute.
+        _request(
+            session,
+            url="https://keystone.example.com/v3/auth/tokens",
+            method="POST",
+        )
 
     span = span_exporter.get_finished_spans()[0]
-    # Token/discovery requests carry no endpoint_filter -> no service_type.
-    assert span.name == "GET"
+    assert span.name == "POST /v3/auth/tokens"
     assert "openstack.service_type" not in span.attributes
+
+
+def test_request_falls_back_to_method_without_path(instrument, span_exporter):
+    session = ks_session.Session()
+    with mock.patch.object(
+        ks_session.Session, "_send_request", return_value=_fake_response()
+    ):
+        _request(session, url="https://keystone.example.com", method="GET")
+
+    span = span_exporter.get_finished_spans()[0]
+    # No path component -> the span name falls back to the bare method.
+    assert span.name == "GET"
 
 
 def test_trace_context_injected_into_headers(instrument, span_exporter):
