@@ -67,3 +67,4 @@ opentelemetry-instrumentation-oslo-log
 opentelemetry-instrumentation-oslo-messaging
 opentelemetry-instrumentation-taskflow
 opentelemetry-instrumentation-openstacksdk
+opentelemetry-instrumentation-keystonemiddleware

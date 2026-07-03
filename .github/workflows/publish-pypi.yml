@@ -1,7 +1,7 @@
 name: Publish release artifacts
 
 # When a GitHub Release is published this workflow:
-#   1. Publishes the three OpenStack instrumentation packages to PyPI using
+#   1. Publishes the OpenStack instrumentation packages to PyPI using
 #      Trusted Publishing (OIDC) — no API tokens are stored. Each project must
 #      be configured on PyPI with a trusted publisher pointing at this repo,
 #      this workflow file (publish-pypi.yml) and the `pypi` environment.
@@ -39,6 +39,7 @@ jobs:
           - opentelemetry-instrumentation-oslo-messaging
           - opentelemetry-instrumentation-taskflow
           - opentelemetry-instrumentation-openstacksdk
+          - opentelemetry-instrumentation-keystonemiddleware
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -47,7 +48,7 @@ jobs:
         if: github.event_name == 'release'
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          for pair in "oslo-log:oslo_log" "oslo-messaging:oslo_messaging" "taskflow:taskflow" "openstacksdk:openstacksdk"; do
+          for pair in "oslo-log:oslo_log" "oslo-messaging:oslo_messaging" "taskflow:taskflow" "openstacksdk:openstacksdk" "keystonemiddleware:keystonemiddleware"; do
             dir="${pair%%:*}"; mod="${pair##*:}"
             echo "__version__ = \"$VERSION\"" \
               > "instrumentation/opentelemetry-instrumentation-$dir/src/opentelemetry/instrumentation/$mod/version.py"
@@ -78,7 +79,7 @@ jobs:
         if: github.event_name == 'release'
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          for pair in "oslo-log:oslo_log" "oslo-messaging:oslo_messaging" "taskflow:taskflow" "openstacksdk:openstacksdk"; do
+          for pair in "oslo-log:oslo_log" "oslo-messaging:oslo_messaging" "taskflow:taskflow" "openstacksdk:openstacksdk" "keystonemiddleware:keystonemiddleware"; do
             dir="${pair%%:*}"; mod="${pair##*:}"
             echo "__version__ = \"$VERSION\"" \
               > "instrumentation/opentelemetry-instrumentation-$dir/src/opentelemetry/instrumentation/$mod/version.py"
