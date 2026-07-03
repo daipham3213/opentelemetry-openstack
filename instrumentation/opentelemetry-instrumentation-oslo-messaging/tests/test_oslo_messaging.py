@@ -19,6 +19,18 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
     InMemorySpanExporter,
 )
+from opentelemetry.trace import SpanKind
+
+
+def _producer_span(span_exporter):
+    """The single PRODUCER span the instrumentor opened for a send."""
+    producers = [
+        span
+        for span in span_exporter.get_finished_spans()
+        if span.kind == SpanKind.PRODUCER
+    ]
+    assert len(producers) == 1
+    return producers[0]
 
 
 @pytest.fixture(autouse=True)
@@ -86,7 +98,9 @@ def test_instrumentation_dependencies():
     )
 
 
-def test_send_injects_active_context(transport, instrumentor, tracer):
+def test_send_injects_active_context(
+    transport, instrumentor, tracer, span_exporter
+):
     transport, sent = transport
     target = SimpleNamespace(topic="topic")
     ctxt = {}
@@ -100,17 +114,63 @@ def test_send_injects_active_context(transport, instrumentor, tracer):
     assert "traceparent" in sent["ctxt"]
     assert format(expected_trace_id, "032x") in sent["ctxt"]["traceparent"]
 
+    # The producer span is named after the RPC method.
+    producer = _producer_span(span_exporter)
+    assert producer.name == "do_thing send"
+    assert producer.attributes["rpc.method"] == "do_thing"
 
-def test_send_notification_injects_active_context(
-    transport, instrumentor, tracer
+
+def test_send_names_span_with_namespace(
+    transport, instrumentor, tracer, span_exporter
 ):
     transport, sent = transport
     target = SimpleNamespace(topic="topic")
 
     with tracer.start_as_current_span("producer"):
-        transport._send_notification(target, {}, {"event_type": "e"}, "2.0")
+        transport._send(
+            target, {}, {"method": "do_thing", "namespace": "baremetal"}
+        )
+
+    assert _producer_span(span_exporter).name == "baremetal.do_thing send"
+
+
+def test_send_notification_names_span_by_event_type(
+    transport, instrumentor, tracer, span_exporter
+):
+    transport, sent = transport
+    target = SimpleNamespace(topic="topic")
+
+    with tracer.start_as_current_span("producer"):
+        transport._send_notification(
+            target,
+            {},
+            {"event_type": "compute.instance.create.start"},
+            "2.0",
+        )
 
     assert "traceparent" in sent["ctxt"]
+    # A notification carries no RPC method, so the span is named by event type
+    # (rather than the old "None send").
+    producer = _producer_span(span_exporter)
+    assert producer.name == "compute.instance.create.start send"
+    assert (
+        producer.attributes["oslo_messaging.notification.event_type"]
+        == "compute.instance.create.start"
+    )
+
+
+def test_send_falls_back_to_plain_send_name(
+    transport, instrumentor, tracer, span_exporter
+):
+    transport, sent = transport
+    target = SimpleNamespace(topic="topic")
+
+    with tracer.start_as_current_span("producer"):
+        # A message with neither a method nor an event type must never produce
+        # a "None send" span name.
+        transport._send(target, {}, {})
+
+    assert _producer_span(span_exporter).name == "send"
 
 
 def test_non_dict_context_is_left_untouched(transport, instrumentor, tracer):

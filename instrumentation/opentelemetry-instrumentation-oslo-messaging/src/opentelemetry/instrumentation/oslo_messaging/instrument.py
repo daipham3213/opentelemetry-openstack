@@ -66,7 +66,8 @@ class OsloMessagingInstrumentor(BaseInstrumentor):
             schema_url="https://opentelemetry.io/schemas/1.11.0",
         )
 
-        # Producer: inject trace context into the on-the-wire context dict.
+        # Producer: open a PRODUCER span and inject trace context into the
+        # on-the-wire context dict.
         wrapt.wrap_function_wrapper(
             Transport,
             "_send",
@@ -75,7 +76,7 @@ class OsloMessagingInstrumentor(BaseInstrumentor):
         wrapt.wrap_function_wrapper(
             Transport,
             "_send_notification",
-            decorators.inject_trace(tracer),
+            decorators.inject_trace(tracer, is_notification=True),
         )
 
         # Consumer: open spans parented to the producer.

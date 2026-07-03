@@ -2,14 +2,14 @@
 
 The instrumentation has two thin halves:
 
-* **Producer — context injection.** :func:`inject_wrapper` wraps
-  ``Transport._send`` / ``Transport._send_notification``. By that point the
-  per-message context has *already* been serialized into the plain dictionary
-  that goes on the wire, so injecting W3C trace context there is reliable and
-  serializer-agnostic (it works with any ``Serializer`` subclass, including
-  production's ``RequestContextSerializer`` whose ``to_dict()`` would otherwise
-  drop unknown keys). No span is produced — the linkage rides on whatever span
-  is already active in the caller.
+* **Producer — span + context injection.** :func:`inject_wrapper` wraps
+  ``Transport._send`` / ``Transport._send_notification``, opening a ``PRODUCER``
+  span named after the operation (the RPC method or the notification event
+  type). By that point the per-message context has *already* been serialized
+  into the plain dictionary that goes on the wire, so injecting W3C trace
+  context there is reliable and serializer-agnostic (it works with any
+  ``Serializer`` subclass, including production's ``RequestContextSerializer``
+  whose ``to_dict()`` would otherwise drop unknown keys).
 
 * **Consumer — span + context extraction.** :func:`rpc_server_wrapper` and
   :func:`notification_server_wrapper` wrap the dispatchers, opening a
@@ -72,17 +72,39 @@ def _arg(args: tuple, index: int, kwargs: dict, name: str) -> Any:
     return kwargs.get(name)
 
 
-def inject_trace(tracer: Tracer):
+def _rpc_method(message: Mapping) -> Optional[str]:
+    """The dotted RPC method name from an outgoing RPC message, if present.
+
+    An RPC message dict carries the remote ``method`` (and optional
+    ``namespace``); a notification message does not, so this returns ``None``
+    for notifications.
+
+    :param message: The message dict about to be sent.
+    :returns: ``namespace.method`` (or just ``method``), or ``None``.
+    """
+    if not isinstance(message, Mapping):
+        return None
+    rpc_method = message.get("method")
+    if not rpc_method:
+        return None
+    namespace = message.get("namespace")
+    return f"{namespace}.{rpc_method}" if namespace else str(rpc_method)
+
+
+def inject_trace(tracer: Tracer, is_notification: bool = False):
 
     def inject_wrapper(
         wrapped: WrappedFn, instance: Any, args: tuple, kwargs: dict
     ) -> Any:
-        """Inject the active trace context into an outgoing message's context.
+        """Open a ``PRODUCER`` span and inject trace context into the message.
 
-        Wraps ``Transport._send`` / ``Transport._send_notification``. The second
-        positional argument is the already-serialized context dictionary about to
-        go on the wire; a ``traceparent`` entry is added to it when a span is
-        active. No span is created here.
+        Wraps ``Transport._send`` (RPC) or ``Transport._send_notification``
+        (notifications). The span is named after the operation being sent -- the
+        RPC method (``start_instance send``) or the notification event type
+        (``compute.instance.create.start send``), falling back to ``send`` when
+        neither is available (never ``None send``). The already-serialized
+        context dict (second positional argument) gets a ``traceparent`` entry
+        so the consumer can continue the trace.
 
         :param wrapped: The original transport send method.
         :param instance: The bound ``Transport`` instance.
@@ -97,15 +119,18 @@ def inject_trace(tracer: Tracer):
         # Keep the original ``ctxt`` object: injection must mutate the very dict
         # that goes on the wire, so it cannot be replaced with ``or {}``.
         ctxt = _arg(args, 1, kwargs, "ctxt")
-        method = _arg(args, 2, kwargs, "method") or {}
         target = _arg(args, 0, kwargs, "target")
+        message = _arg(args, 2, kwargs, "message")
+        if not isinstance(message, Mapping):
+            message = {}
 
-        rpc_method = method.get("method")
-        namespace = method.get("namespace")
-        if namespace:
-            rpc_method = f"{namespace}.{rpc_method}"
+        if is_notification:
+            event_type = message.get("event_type")
+            dest = f"{event_type} send" if event_type else "send"
+        else:
+            rpc_method = _rpc_method(message)
+            dest = f"{rpc_method} send" if rpc_method else "send"
 
-        dest = f"{rpc_method} send"
         span = tracer.start_span(name=dest, kind=SpanKind.PRODUCER)
         if span.is_recording():
             span.set_attribute(
@@ -115,7 +140,17 @@ def inject_trace(tracer: Tracer):
                 span.set_attribute(
                     messaging_attributes.MESSAGING_DESTINATION_NAME, exchange
                 )
-            _set_rpc_attributes(span, ctxt=ctxt, method=rpc_method)
+            if is_notification:
+                _set_notification_attributes(
+                    span,
+                    event_type=message.get("event_type"),
+                    priority=message.get("priority"),
+                    publisher_id=message.get("publisher_id"),
+                )
+            else:
+                _set_rpc_attributes(
+                    span, ctxt=ctxt, method=_rpc_method(message)
+                )
 
         with trace.use_span(span, end_on_exit=True):
             # Only a mapping can carry the injected ``traceparent`` on the wire.
@@ -128,10 +163,10 @@ def inject_trace(tracer: Tracer):
 
 
 def _set_rpc_attributes(span: Span, ctxt: dict, method: Optional[str]) -> None:
-    """Record RPC consumer span attributes.
+    """Record RPC span attributes (shared by the producer and consumer sides).
 
     :param span: The recording span to enrich.
-    :param method: The remote method being handled, if known.
+    :param method: The remote method being sent/handled, if known.
     """
     span.set_attribute(messaging_attributes.MESSAGING_SYSTEM, MESSAGING_SYSTEM)
     span.set_attribute(

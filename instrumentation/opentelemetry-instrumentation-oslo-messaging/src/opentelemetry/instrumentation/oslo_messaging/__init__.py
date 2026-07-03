@@ -10,12 +10,14 @@ Usage::
 
 The instrumentor patches two thin layers:
 
-**Producer — context injection.** ``Transport._send`` and
-``Transport._send_notification`` inject the active W3C trace context into the
-already-serialized context dictionary that goes on the wire. This is
-serializer-agnostic (it runs *after* the serializer) and covers every send
-path: RPC calls, casts, fanout, replies, and notifications. No producer span is
-created — the linkage rides on whatever span is active in the caller.
+**Producer — spans + context injection.** ``Transport._send`` and
+``Transport._send_notification`` open a ``PRODUCER`` span named after the
+operation being sent -- the RPC method (``start_instance send``) or the
+notification event type (``compute.instance.create.start send``) -- and inject
+the active W3C trace context into the already-serialized context dictionary that
+goes on the wire. This is serializer-agnostic (it runs *after* the serializer)
+and covers every send path: RPC calls, casts, fanout, replies, and
+notifications.
 
 **Consumer — spans.** ``RPCDispatcher.dispatch`` and
 ``NotificationDispatcher.dispatch`` open ``CONSUMER`` spans parented to the
