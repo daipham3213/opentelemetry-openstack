@@ -40,6 +40,7 @@ jobs:
           - opentelemetry-instrumentation-taskflow
           - opentelemetry-instrumentation-openstacksdk
           - opentelemetry-instrumentation-keystonemiddleware
+          - opentelemetry-instrumentation-keystoneauth1
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -48,7 +49,7 @@ jobs:
         if: github.event_name == 'release'
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          for pair in "oslo-log:oslo_log" "oslo-messaging:oslo_messaging" "taskflow:taskflow" "openstacksdk:openstacksdk" "keystonemiddleware:keystonemiddleware"; do
+          for pair in "oslo-log:oslo_log" "oslo-messaging:oslo_messaging" "taskflow:taskflow" "openstacksdk:openstacksdk" "keystonemiddleware:keystonemiddleware" "keystoneauth1:keystoneauth1"; do
             dir="${pair%%:*}"; mod="${pair##*:}"
             echo "__version__ = \"$VERSION\"" \
               > "instrumentation/opentelemetry-instrumentation-$dir/src/opentelemetry/instrumentation/$mod/version.py"
@@ -79,7 +80,7 @@ jobs:
         if: github.event_name == 'release'
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          for pair in "oslo-log:oslo_log" "oslo-messaging:oslo_messaging" "taskflow:taskflow" "openstacksdk:openstacksdk" "keystonemiddleware:keystonemiddleware"; do
+          for pair in "oslo-log:oslo_log" "oslo-messaging:oslo_messaging" "taskflow:taskflow" "openstacksdk:openstacksdk" "keystonemiddleware:keystonemiddleware" "keystoneauth1:keystoneauth1"; do
             dir="${pair%%:*}"; mod="${pair##*:}"
             echo "__version__ = \"$VERSION\"" \
               > "instrumentation/opentelemetry-instrumentation-$dir/src/opentelemetry/instrumentation/$mod/version.py"

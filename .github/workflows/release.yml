@@ -29,7 +29,7 @@ jobs:
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
           echo "Bumping to $VERSION"
-          for pair in "oslo-log:oslo_log" "oslo-messaging:oslo_messaging" "taskflow:taskflow" "openstacksdk:openstacksdk" "keystonemiddleware:keystonemiddleware"; do
+          for pair in "oslo-log:oslo_log" "oslo-messaging:oslo_messaging" "taskflow:taskflow" "openstacksdk:openstacksdk" "keystonemiddleware:keystonemiddleware" "keystoneauth1:keystoneauth1"; do
             dir="${pair%%:*}"; mod="${pair##*:}"
             echo "__version__ = \"$VERSION\"" \
               > "instrumentation/opentelemetry-instrumentation-$dir/src/opentelemetry/instrumentation/$mod/version.py"
