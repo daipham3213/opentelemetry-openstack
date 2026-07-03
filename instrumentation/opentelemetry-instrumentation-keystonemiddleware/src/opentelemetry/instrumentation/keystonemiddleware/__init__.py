@@ -10,7 +10,7 @@ the request with the authenticated identity (``X-User-Id``, ``X-Project-Id``,
 
 The instrumentor wraps two choke points, producing two nested spans::
 
-    keystonemiddleware.request        (SERVER, spans the whole WSGI request)
+    GET /v2.1/servers                 (SERVER, spans the whole WSGI request)
       keystonemiddleware.authenticate (INTERNAL, the token validation step)
       <the service's own handler work: RPC sends, taskflow runs, ...>
 
@@ -265,6 +265,27 @@ def _status_code(status_line: Any) -> Optional[int]:
         return None
 
 
+def _request_span_name(environ: Any) -> str:
+    """Name the request span after the action, e.g. ``GET /v2.1/servers``.
+
+    Falls back to the bare method, then to a generic label, when the WSGI
+    environ does not carry the pieces (so the span always has a sensible name).
+
+    Args:
+        environ: The WSGI environment of the incoming request.
+
+    Returns:
+        The span name.
+    """
+    if not isinstance(environ, dict):
+        return _REQUEST_SPAN_NAME
+    method: str = str(environ.get("REQUEST_METHOD") or "").upper()
+    path: str = str(environ.get("PATH_INFO") or "")
+    if method and path:
+        return f"{method} {path}"
+    return method or _REQUEST_SPAN_NAME
+
+
 def _token_present(request: Any, attr: str) -> bool:
     """Whether the request carried the named token, tolerating access errors.
 
@@ -415,7 +436,7 @@ def _call_wrapper(tracer: Tracer) -> Wrapper:
         attributes: Attributes = _request_attributes(environ)
 
         with tracer.start_as_current_span(
-            _REQUEST_SPAN_NAME,
+            _request_span_name(environ),
             context=parent,
             kind=kind,
             attributes=attributes,
