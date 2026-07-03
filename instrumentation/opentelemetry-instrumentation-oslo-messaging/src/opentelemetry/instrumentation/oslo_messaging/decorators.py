@@ -24,6 +24,7 @@ failure modes and the wrapped callable is always invoked. Exceptions raised by
 the wrapped callable propagate unchanged and are recorded on the active span.
 """
 
+import functools
 from typing import Any, Callable, Mapping, Optional
 
 from opentelemetry import context, propagate, trace
@@ -40,6 +41,7 @@ __all__ = [
     "inject_trace",
     "rpc_server_wrapper",
     "notification_server_wrapper",
+    "spawn_wrapper",
 ]
 
 #: ``messaging.system`` / ``rpc.system`` value identifying this transport.
@@ -325,5 +327,51 @@ def notification_server_wrapper(tracer: Tracer) -> Wrapper:
         if token:
             context.detach(token)
         return result
+
+    return wrapper
+
+
+def spawn_wrapper(func_index: int = 0) -> Wrapper:
+    """Carry the active trace context into an eventlet greenthread.
+
+    eventlet runs each greenthread with its *own* ``contextvars`` context, so a
+    callable handed to ``spawn``/``spawn_n``/``spawn_after`` starts with an empty
+    context and any spans it opens land on a fresh, disconnected trace. This is
+    what breaks a trace at, e.g., nova-compute's ``build_and_run_instance``,
+    which hands the real work to a greenthread right after the RPC is dispatched.
+
+    The wrapper captures the context at spawn time (inside the consumer span, on
+    the dispatching greenthread) and re-attaches it around the callable when the
+    greenthread runs, so the spawned work continues the same trace.
+
+    :param func_index: Position of the spawned callable among the positional
+        arguments -- ``0`` for ``spawn``/``spawn_n``/``GreenPool.spawn``; ``1``
+        for ``spawn_after``, whose first argument is the delay.
+    :returns: A ``wrapt``-style wrapper
+        ``(wrapped, instance, args, kwargs) -> Any``.
+    """
+
+    def wrapper(
+        wrapped: WrappedFn, instance: Any, args: tuple, kwargs: dict
+    ) -> Any:
+        if not is_instrumentation_enabled() or len(args) <= func_index:
+            return wrapped(*args, **kwargs)
+
+        func = args[func_index]
+        if not callable(func):
+            return wrapped(*args, **kwargs)
+
+        captured = context.get_current()
+
+        @functools.wraps(func)
+        def traced(*a: Any, **k: Any) -> Any:
+            token = context.attach(captured)
+            try:
+                return func(*a, **k)
+            finally:
+                context.detach(token)
+
+        args = args[:func_index] + (traced,) + args[func_index + 1 :]
+        return wrapped(*args, **kwargs)
 
     return wrapper

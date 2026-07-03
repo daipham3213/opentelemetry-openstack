@@ -27,6 +27,14 @@ producer, extracting context from the incoming message:
 * ``NotificationDispatcher.dispatch`` → ``oslo.messaging.notification.process``
 
 Message payloads are never recorded as span attributes.
+
+**Greenthread propagation.** When eventlet is present, the instrumentor also
+wraps ``eventlet.spawn``/``spawn_n``/``spawn_after`` and ``GreenPool.spawn``/
+``spawn_n`` to carry the active trace context into the spawned greenthread.
+eventlet gives each greenthread its own ``contextvars`` context, so work an RPC
+handler hands off to a greenthread (as nova-compute's ``build_and_run_instance``
+does) would otherwise start on a fresh, disconnected trace; this keeps it on the
+consumer's trace.
 """
 
 import logging
