@@ -14,6 +14,51 @@ A monorepo for OpenTelemetry instrumentation packages targeting OpenStack-relate
 - `opentelemetry-instrumentation-openstacksdk` — records a `CLIENT` span for
   every OpenStack SDK REST call (wrapping `openstack.proxy.Proxy.request`) and
   injects trace context into the outgoing request headers.
+- `opentelemetry-instrumentation-keystoneauth1` — records a `CLIENT` span for
+  every HTTP call the shared `keystoneauth1` session makes (service calls, token
+  fetches, discovery), injecting trace context into the outgoing headers. Sits
+  below the SDK proxy, so it also captures the token/discovery calls the SDK
+  instrumentation leaves untraced.
+- `opentelemetry-instrumentation-keystonemiddleware` — the server-side entry
+  point. Wraps the `auth_token` WSGI middleware to open a `SERVER` span for the
+  whole request (continuing the trace from the incoming headers) with a nested
+  `INTERNAL` span for token validation and the resolved identity.
+
+## How the packages compose into one trace
+
+The packages are designed to hand a single trace off to one another end to end.
+Every seam uses the **global** propagator (W3C `traceparent` by default), so
+injection and extraction always agree:
+
+```
+client process                          service process (e.g. nova-api)
+──────────────                          ───────────────────────────────
+openstacksdk   Proxy.request  CLIENT
+  keystoneauth1 Session.request CLIENT ──HTTP traceparent──▶ keystonemiddleware
+                                                             __call__      SERVER
+                                                               authenticate  INTERNAL
+                                                               handler work…
+                                                                 oslo.messaging
+                                                                 _send      PRODUCER
+                                                                   │ ctxt traceparent
+                                                                   ▼
+                                                             another service
+                                                             RPCDispatcher CONSUMER
+```
+
+- **Client → HTTP → server**: the SDK proxy and keystoneauth1 client spans nest
+  in one trace and inject the innermost context onto the wire; keystonemiddleware
+  extracts it and continues the trace on the server.
+- **Server request scope**: keystonemiddleware's `SERVER` span stays active for
+  the entire WSGI request, so everything the service handler does while serving
+  it — `oslo.messaging` sends, `taskflow` runs, and `oslo.log` records (which
+  carry the active `otelTraceID`) — joins the same trace instead of starting a
+  disconnected one.
+- **RPC / notifications**: `oslo.messaging` injects context into the on-the-wire
+  message and the consumer opens a span parented to the producer.
+- **Nesting with standard instrumentors**: if an upstream WSGI/framework
+  instrumentor already opened the server span, keystonemiddleware nests under it
+  as `INTERNAL` rather than opening a second server span.
 
 ## Auto-instrumentation image
 
@@ -23,7 +68,7 @@ The repository also publishes a Python auto-instrumentation image,
 drop-in replacement for the upstream
 [`autoinstrumentation-python`](https://github.com/open-telemetry/opentelemetry-operator#opentelemetry-auto-instrumentation-injection)
 image: it bundles `opentelemetry-distro`, the standard contrib
-instrumentations, **and** the four OpenStack packages above, so OpenStack
+instrumentations, **and** the six OpenStack packages above, so OpenStack
 services get traced without changing the application image.
 
 Tags follow the release version (`{{version}}`, `{{major}}.{{minor}}`,
@@ -82,6 +127,8 @@ tox -e taskflow
 tox -e oslo.log
 tox -e oslo.messaging
 tox -e openstacksdk
+tox -e keystonemiddleware
+tox -e keystoneauth1
 ```
 
 Run every package's tests:
