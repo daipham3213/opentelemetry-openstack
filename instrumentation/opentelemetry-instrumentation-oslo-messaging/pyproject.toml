@@ -25,6 +25,7 @@ dependencies = [
     "opentelemetry-instrumentation",
     "opentelemetry-semantic-conventions",
     "opentelemetry-util-http",
+    "opentelemetry-instrumentation-oslo-service",
 ]
 
 [project.optional-dependencies]

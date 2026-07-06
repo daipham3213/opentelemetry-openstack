@@ -107,6 +107,10 @@ class OsloLogInstrumentor(BaseInstrumentor):
             log_handler_level: Level applied to the installed handler.
             map_oslo_context: When True (default), maps oslo request context
                 (request id, user/project ids, ...) onto exported attributes.
+
+        Note: correlating records logged on worker threads/greenthreads (so they
+        keep the active trace instead of exporting ``trace_id``/``span_id`` == 0)
+        is handled by ``opentelemetry-instrumentation-oslo-service``.
         """
         if oslo_logging is None:
             return  # oslo.log is not available

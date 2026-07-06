@@ -39,30 +39,6 @@ except ImportError:
         "will be disabled"
     )
 
-# eventlet greenthread spawns to patch, as ``(owner, method, callable_index)``.
-# OpenStack services (e.g. nova-compute's ``build_and_run_instance``) hand the
-# real work to a greenthread right after an RPC is dispatched; eventlet gives
-# each greenthread its own contextvars, so without this the work would start on
-# a fresh, disconnected trace. ``callable_index`` is where the spawned function
-# sits in the positional args (``spawn_after`` takes a delay first).
-_EVENTLET_SPAWNS: Tuple[Tuple[Any, str, int], ...] = ()
-
-try:
-    import eventlet
-    from eventlet.greenpool import GreenPool
-
-    _EVENTLET_SPAWNS = (
-        (eventlet, "spawn", 0),
-        (eventlet, "spawn_n", 0),
-        (eventlet, "spawn_after", 1),
-        (GreenPool, "spawn", 0),
-        (GreenPool, "spawn_n", 0),
-    )
-except ImportError:
-    eventlet = None
-    GreenPool = None
-    _EVENTLET_SPAWNS = ()
-
 
 class OsloMessagingInstrumentor(BaseInstrumentor):
     """Instrument oslo.messaging RPC and notification transports."""
@@ -74,8 +50,9 @@ class OsloMessagingInstrumentor(BaseInstrumentor):
     def _instrument(self, **kwargs: Any) -> None:
         """Patch oslo.messaging to inject context and emit consumer spans.
 
-        Also propagates the active trace context across eventlet greenthreads so
-        work an RPC handler spawns stays on the request's trace.
+        Trace continuity across greenthreads/worker threads (so work an RPC
+        handler hands off stays on the request's trace) is handled by
+        ``opentelemetry-instrumentation-oslo-service``.
 
         :keyword tracer_provider: Optional
             :class:`opentelemetry.trace.TracerProvider` overriding the global
@@ -115,17 +92,7 @@ class OsloMessagingInstrumentor(BaseInstrumentor):
                 decorators.notification_server_wrapper(tracer),
             )
 
-        # Carry the active trace context across eventlet greenthreads so work a
-        # handler hands off (e.g. nova's build_and_run_instance) continues the
-        # same trace instead of starting a disconnected one.
-        for owner, name, func_index in _EVENTLET_SPAWNS:
-            wrapt.wrap_function_wrapper(
-                owner, name, decorators.spawn_wrapper(func_index)
-            )
-
     def _uninstrument(self, **kwargs: Any) -> None:
-        """Restore all patched oslo.messaging and eventlet entry points."""
+        """Restore all patched oslo.messaging entry points."""
         for owner, name in _WRAPPED_METHODS:
-            unwrap(owner, name)
-        for owner, name, _ in _EVENTLET_SPAWNS:
             unwrap(owner, name)

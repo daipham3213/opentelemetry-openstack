@@ -28,57 +28,14 @@ producer, extracting context from the incoming message:
 
 Message payloads are never recorded as span attributes.
 
-**Greenthread propagation.** When eventlet is present, the instrumentor also
-wraps ``eventlet.spawn``/``spawn_n``/``spawn_after`` and ``GreenPool.spawn``/
-``spawn_n`` to carry the active trace context into the spawned greenthread.
-eventlet gives each greenthread its own ``contextvars`` context, so work an RPC
-handler hands off to a greenthread (as nova-compute's ``build_and_run_instance``
-does) would otherwise start on a fresh, disconnected trace; this keeps it on the
-consumer's trace.
+**Trace continuity across concurrency.** Keeping a consumer's trace on work it
+hands to a greenthread or worker thread (as nova-compute's
+``build_and_run_instance`` does right after dispatch) is the job of
+``opentelemetry-instrumentation-oslo-service``, which also selects the
+oslo.service backend. Enable it alongside this instrumentor.
 """
 
-import logging
 from importlib import import_module
-from os import environ
-
-_LOG = logging.getLogger(__name__)
-
-try:
-    from oslo_service import backend
-
-    _OSLO_SERVICE_BACKEND_MAPPING = {
-        "threading": backend.BackendType.THREADING,
-        "eventlet": backend.BackendType.EVENTLET,
-    }
-
-    OSLO_SERVICE_BACKEND = environ.get(
-        "OTEL_PYTHON_OSLO_SERVICE_BACKEND", "threading"
-    )
-
-    OSLO_SERVICE_BACKEND_TYPE = _OSLO_SERVICE_BACKEND_MAPPING[
-        OSLO_SERVICE_BACKEND
-    ]
-
-    # Only select the backend if the host application has not already chosen one.
-    # ``init_backend`` raises if a *different* backend is already active, and a
-    # backend gets selected as a side effect of importing parts of oslo.messaging
-    # (it defaults to eventlet), so blindly initializing here would break any host
-    # that imported oslo.messaging first. Respect the existing choice instead.
-    _current_backend = backend.get_backend_type()
-    if _current_backend is None:
-        backend.init_backend(OSLO_SERVICE_BACKEND_TYPE)
-    elif _current_backend != OSLO_SERVICE_BACKEND_TYPE:
-        _LOG.debug(
-            "oslo_service backend already set to %r; leaving it unchanged "
-            "(requested %r via OTEL_PYTHON_OSLO_SERVICE_BACKEND)",
-            _current_backend.value,
-            OSLO_SERVICE_BACKEND_TYPE.value,
-        )
-except ImportError:
-    _LOG.debug(
-        "oslo_service.backend unavailable (oslo.service < 4.1.0); "
-        "skipping backend selection - span instrumentation still active"
-    )
 
 instrument = import_module(
     "opentelemetry.instrumentation.oslo_messaging.instrument"

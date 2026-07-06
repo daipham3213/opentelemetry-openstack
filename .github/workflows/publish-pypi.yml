@@ -37,6 +37,7 @@ jobs:
         package:
           - opentelemetry-instrumentation-oslo-log
           - opentelemetry-instrumentation-oslo-messaging
+          - opentelemetry-instrumentation-oslo-service
           - opentelemetry-instrumentation-taskflow
           - opentelemetry-instrumentation-openstacksdk
           - opentelemetry-instrumentation-keystonemiddleware
@@ -49,7 +50,7 @@ jobs:
         if: github.event_name == 'release'
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          for pair in "oslo-log:oslo_log" "oslo-messaging:oslo_messaging" "taskflow:taskflow" "openstacksdk:openstacksdk" "keystonemiddleware:keystonemiddleware" "keystoneauth1:keystoneauth1"; do
+          for pair in "oslo-log:oslo_log" "oslo-messaging:oslo_messaging" "oslo-service:oslo_service" "taskflow:taskflow" "openstacksdk:openstacksdk" "keystonemiddleware:keystonemiddleware" "keystoneauth1:keystoneauth1"; do
             dir="${pair%%:*}"; mod="${pair##*:}"
             echo "__version__ = \"$VERSION\"" \
               > "instrumentation/opentelemetry-instrumentation-$dir/src/opentelemetry/instrumentation/$mod/version.py"
@@ -80,7 +81,7 @@ jobs:
         if: github.event_name == 'release'
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          for pair in "oslo-log:oslo_log" "oslo-messaging:oslo_messaging" "taskflow:taskflow" "openstacksdk:openstacksdk" "keystonemiddleware:keystonemiddleware" "keystoneauth1:keystoneauth1"; do
+          for pair in "oslo-log:oslo_log" "oslo-messaging:oslo_messaging" "oslo-service:oslo_service" "taskflow:taskflow" "openstacksdk:openstacksdk" "keystonemiddleware:keystonemiddleware" "keystoneauth1:keystoneauth1"; do
             dir="${pair%%:*}"; mod="${pair##*:}"
             echo "__version__ = \"$VERSION\"" \
               > "instrumentation/opentelemetry-instrumentation-$dir/src/opentelemetry/instrumentation/$mod/version.py"
@@ -98,7 +99,7 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           req=autoinstrumentation/requirements.txt
-          for dir in oslo-log oslo-messaging taskflow openstacksdk keystonemiddleware keystoneauth1; do
+          for dir in oslo-log oslo-messaging oslo-service taskflow openstacksdk keystonemiddleware keystoneauth1; do
             pkg="opentelemetry-instrumentation-$dir"
             sed -i -E "s|^(${pkg})(==[^[:space:]]*)?\$|\1==${VERSION}|" "$req"
           done

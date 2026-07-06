@@ -11,6 +11,10 @@ A monorepo for OpenTelemetry instrumentation packages targeting OpenStack-relate
   the active trace context.
 - `opentelemetry-instrumentation-oslo-messaging` — propagates trace context
   across `oslo.messaging` RPC and notifications and records consumer spans.
+- `opentelemetry-instrumentation-oslo-service` — keeps the active trace alive
+  across `oslo.service`'s concurrency primitives (native threads, `futurist`
+  pools, and eventlet greenthreads), so spans and logs created in spawned work
+  stay on the request's trace. Also selects the `oslo.service` backend.
 - `opentelemetry-instrumentation-openstacksdk` — records a `CLIENT` span for
   every OpenStack SDK REST call (wrapping `openstack.proxy.Proxy.request`) and
   injects trace context into the outgoing request headers.
