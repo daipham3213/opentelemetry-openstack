@@ -4,8 +4,8 @@ eventlet gives each greenthread its own ``contextvars`` context, so a callable
 handed to ``spawn``/``spawn_n``/``spawn_after``/``GreenPool.spawn`` starts with an
 empty context and opens a disconnected trace -- this is what breaks the trace at
 nova-compute's ``build_and_run_instance``, which spawns the real work right after
-the RPC is dispatched. The instrumentor wraps the eventlet spawns to carry the
-context across; these tests exercise that.
+the RPC is dispatched. ``OsloServiceInstrumentor`` wraps the eventlet spawns to
+carry the context across; these tests exercise that.
 
 No ``eventlet.monkey_patch()`` is needed: greenlet isolates ``contextvars`` per
 greenthread on its own, so the break (and the fix) reproduce without patching the
@@ -16,9 +16,7 @@ import eventlet
 import pytest
 from eventlet.greenpool import GreenPool
 
-from opentelemetry.instrumentation.oslo_messaging import (
-    OsloMessagingInstrumentor,
-)
+from opentelemetry.instrumentation.oslo_service import OsloServiceInstrumentor
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
@@ -28,10 +26,10 @@ from opentelemetry.trace import SpanKind
 
 
 @pytest.fixture(autouse=True)
-def uninstrument_oslo_messaging():
-    OsloMessagingInstrumentor().uninstrument()
+def uninstrument_oslo_service():
+    OsloServiceInstrumentor().uninstrument()
     yield
-    OsloMessagingInstrumentor().uninstrument()
+    OsloServiceInstrumentor().uninstrument()
 
 
 @pytest.fixture
@@ -52,9 +50,9 @@ def tracer(tracer_provider):
 
 
 @pytest.fixture
-def instrumentor(tracer_provider):
-    inst = OsloMessagingInstrumentor()
-    inst.instrument(tracer_provider=tracer_provider)
+def instrumentor():
+    inst = OsloServiceInstrumentor()
+    inst.instrument()
     yield inst
     inst.uninstrument()
 

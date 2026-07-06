@@ -65,6 +65,7 @@ opentelemetry-instrumentation-wsgi==0.63b1
 
 opentelemetry-instrumentation-oslo-log
 opentelemetry-instrumentation-oslo-messaging
+opentelemetry-instrumentation-oslo-service
 opentelemetry-instrumentation-taskflow
 opentelemetry-instrumentation-openstacksdk
 opentelemetry-instrumentation-keystonemiddleware

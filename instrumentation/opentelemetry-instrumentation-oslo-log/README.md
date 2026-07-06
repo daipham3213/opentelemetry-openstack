@@ -19,6 +19,16 @@ traces. On `instrument()` it:
 The exported log body is the raw log message; structured fields travel as
 attributes.
 
+> **Correlation across threads/greenthreads:** the trace a record is correlated
+> to comes from the *current* OpenTelemetry context, which lives in a
+> `contextvars.Context` that Python does not copy into worker threads or
+> greenthreads. A record logged off the request thread would otherwise export
+> `trace_id`/`span_id` as `0` — the common cause of "my oslo.log records have no
+> trace id" in OpenStack. Enable
+> [`opentelemetry-instrumentation-oslo-service`](../opentelemetry-instrumentation-oslo-service),
+> which carries the context across oslo.service's concurrency primitives
+> (`threading.Thread`, `futurist` pools, and eventlet spawns).
+
 `oslo_log.log.setup` rebuilds the root logger's handlers from oslo.config,
 dropping every existing handler. The instrumentor wraps `setup` so the
 exporting handler is re-attached afterwards, and keeps working even when
