@@ -110,6 +110,24 @@ def _select_backend(requested: Optional[str]) -> None:
         )
 
 
+def _pre_instrument() -> None:
+    """Select the oslo.service backend before any instrumentor is loaded.
+
+    Registered as an ``opentelemetry_pre_instrument`` hook. Auto-instrumentation
+    runs those hooks *before* it loads any instrumentor, hence before an
+    instrumentor imports its target library (oslo.messaging, taskflow, ...) and
+    that import lazily resolves oslo.service's backend to its eventlet default.
+
+    ``OsloServiceInstrumentor._instrument`` also selects the backend, but only
+    wins if it happens to run before any such library import -- which it cannot
+    guarantee, since instrumentor load order is not controlled. Selecting from a
+    pre-instrument hook removes that race: the threading default (or whatever
+    ``OTEL_PYTHON_OSLO_SERVICE_BACKEND`` requests) is locked in first, and every
+    later import simply sees the already-chosen backend.
+    """
+    _select_backend(None)
+
+
 class OsloServiceInstrumentor(BaseInstrumentor):
     """Propagate trace context across oslo.service's concurrency primitives."""
 
@@ -138,4 +156,4 @@ class OsloServiceInstrumentor(BaseInstrumentor):
         self._wraps = ()
 
 
-__all__ = ["OsloServiceInstrumentor", "__version__"]
+__all__ = ["OsloServiceInstrumentor", "_pre_instrument", "__version__"]
