@@ -33,6 +33,11 @@ instruments = [
 [project.entry-points.opentelemetry_instrumentor]
 oslo_service = "opentelemetry.instrumentation.oslo_service:OsloServiceInstrumentor"
 
+# Runs before any instrumentor loads its target library, so the oslo.service
+# backend is chosen before an import can lazily lock in the eventlet default.
+[project.entry-points.opentelemetry_pre_instrument]
+oslo_service = "opentelemetry.instrumentation.oslo_service:_pre_instrument"
+
 [tool.hatch.version]
 path = "src/opentelemetry/instrumentation/oslo_service/version.py"
 
