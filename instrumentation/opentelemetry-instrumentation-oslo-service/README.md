@@ -58,3 +58,32 @@ OsloServiceInstrumentor().instrument()
 OsloMessagingInstrumentor().instrument(tracer_provider=tracer_provider)
 OsloLogInstrumentor().instrument(logger_provider=logger_provider)
 ```
+
+## Auto-instrumentation
+
+Under `opentelemetry-instrument`, this package also ships an OpenTelemetry
+distro and configurator so the instrumentor is enabled without any code change.
+
+### Eventlet monkey-patching
+
+Services that run on the eventlet backend must monkey-patch the stdlib
+*before* anything imports `socket`, `threading`, etc. — otherwise the patch is
+partial and context propagation across greenthreads is unreliable. The
+configurator can do this for you, at the earliest point in the
+auto-instrumentation startup, when you opt in:
+
+```bash
+export OTEL_PYTHON_CONFIGURATOR=oslo_service
+export OTEL_PYTHON_EVENTLET_MONKEY_PATCH=true
+opentelemetry-instrument <your-service>
+```
+
+- `OTEL_PYTHON_EVENTLET_MONKEY_PATCH=true` tells the configurator to call
+  `eventlet.monkey_patch()`. (`eventlet` must be installed; if it is not, a
+  warning is emitted and startup continues unpatched.)
+- `OTEL_PYTHON_CONFIGURATOR=oslo_service` is **required**. Auto-instrumentation
+  loads only one configurator, and the stock `opentelemetry-distro` one is
+  otherwise selected first — so without this the oslo.service configurator (and
+  the monkey-patch) is silently skipped.
+
+If you don't run on eventlet, neither variable is needed.
