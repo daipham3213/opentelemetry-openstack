@@ -23,6 +23,7 @@ dependencies = [
     "wrapt",
     "opentelemetry-api",
     "opentelemetry-instrumentation",
+    "opentelemetry-distro"
 ]
 
 [project.optional-dependencies]
@@ -37,6 +38,12 @@ oslo_service = "opentelemetry.instrumentation.oslo_service:OsloServiceInstrument
 # backend is chosen before an import can lazily lock in the eventlet default.
 [project.entry-points.opentelemetry_pre_instrument]
 oslo_service = "opentelemetry.instrumentation.oslo_service:_pre_instrument"
+
+[project.entry-points.opentelemetry_configurator]
+oslo_service = "opentelemetry.distro.oslo_service:OsloServiceConfigurator"
+
+[project.entry-points.opentelemetry_distro]
+oslo_service = "opentelemetry.distro.oslo_service:OsloServiceDistro"
 
 [tool.hatch.version]
 path = "src/opentelemetry/instrumentation/oslo_service/version.py"
