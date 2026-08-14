@@ -270,7 +270,7 @@ def _request_wrapper(tracer: Tracer) -> Wrapper:
         if service_type:
             attributes[_OPENSTACK_SERVICE_TYPE] = service_type
         if request_id:
-            attributes[_CORRELATION_ID] = request_id
+            attributes[_CORRELATION_ID] = str(request_id)
 
         with tracer.start_as_current_span(
             span_name, kind=SpanKind.CLIENT, attributes=attributes
