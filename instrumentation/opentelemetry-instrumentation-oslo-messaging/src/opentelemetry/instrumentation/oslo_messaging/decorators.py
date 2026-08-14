@@ -177,7 +177,8 @@ def _set_rpc_attributes(span: Span, ctxt: dict, method: Optional[str]) -> None:
         span.set_attribute(rpc_attributes.RPC_METHOD, str(method))
     if isinstance(ctxt, Mapping) and (request_id := ctxt.get("request_id")):
         span.set_attribute(
-            messaging_attributes.MESSAGING_MESSAGE_CONVERSATION_ID, request_id
+            messaging_attributes.MESSAGING_MESSAGE_CONVERSATION_ID,
+            str(request_id),
         )
 
 

@@ -232,7 +232,7 @@ def _request_wrapper(tracer: Tracer) -> Wrapper:
         if region_name:
             attributes[_OPENSTACK_REGION_NAME] = region_name
         if request_id:
-            attributes[_CORRELATION_ID] = request_id
+            attributes[_CORRELATION_ID] = str(request_id)
 
         with tracer.start_as_current_span(
             span_name, kind=SpanKind.CLIENT, attributes=attributes
