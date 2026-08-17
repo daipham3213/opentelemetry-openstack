@@ -67,23 +67,34 @@ distro and configurator so the instrumentor is enabled without any code change.
 ### Eventlet monkey-patching
 
 Services that run on the eventlet backend must monkey-patch the stdlib
-*before* anything imports `socket`, `threading`, etc. — otherwise the patch is
-partial and context propagation across greenthreads is unreliable. The
-configurator can do this for you, at the earliest point in the
-auto-instrumentation startup, when you opt in:
+*before* anything imports `socket`, `ssl`, `select`, etc. — otherwise the patch
+is partial. A partial patch is not just a context-propagation problem: eventlet
+no longer owns the sockets, so a connection (e.g. the RabbitMQ transport) that a
+`fork()`-ing service — such as multi-backend `cinder-volume` under oslo.service
+`ProcessLauncher` — establishes gets inherited across the fork and shared
+between parent and child. oslo.messaging then logs *"Process forked after
+connection established!"* and message ACKs are lost.
+
+To beat that race the patch is applied from the **distro** — the earliest
+in-process hook auto-instrumentation runs, before the SDK's OTLP exporter
+imports the socket stack — and again from the configurator before its own
+`super()._configure()`, so it is correct even with the stock distro. Opt in:
 
 ```bash
+export OTEL_PYTHON_DISTRO=oslo_service
 export OTEL_PYTHON_CONFIGURATOR=oslo_service
 export OTEL_PYTHON_EVENTLET_MONKEY_PATCH=true
 opentelemetry-instrument <your-service>
 ```
 
-- `OTEL_PYTHON_EVENTLET_MONKEY_PATCH=true` tells the configurator to call
-  `eventlet.monkey_patch()`. (`eventlet` must be installed; if it is not, a
-  warning is emitted and startup continues unpatched.)
-- `OTEL_PYTHON_CONFIGURATOR=oslo_service` is **required**. Auto-instrumentation
-  loads only one configurator, and the stock `opentelemetry-distro` one is
-  otherwise selected first — so without this the oslo.service configurator (and
-  the monkey-patch) is silently skipped.
+- `OTEL_PYTHON_EVENTLET_MONKEY_PATCH=true` calls `eventlet.monkey_patch()` at the
+  earliest point and pins `OTEL_PYTHON_OSLO_SERVICE_BACKEND=eventlet` so the
+  backend matches the now-green stack. (`eventlet` must be installed; if it is
+  not, a warning is emitted and startup continues unpatched.)
+- `OTEL_PYTHON_DISTRO=oslo_service` selects `OsloServiceDistro`, which is what
+  makes the patch run early enough (before any exporter import). Without it only
+  the configurator patches, which is later and may already be too late.
+- `OTEL_PYTHON_CONFIGURATOR=oslo_service` is set automatically by the distro; set
+  it explicitly too if you are not using `OTEL_PYTHON_DISTRO=oslo_service`.
 
-If you don't run on eventlet, neither variable is needed.
+If you don't run on eventlet, none of these variables are needed.
