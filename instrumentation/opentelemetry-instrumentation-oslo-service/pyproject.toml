@@ -40,10 +40,10 @@ oslo_service = "opentelemetry.instrumentation.oslo_service:OsloServiceInstrument
 oslo_service = "opentelemetry.instrumentation.oslo_service:_pre_instrument"
 
 [project.entry-points.opentelemetry_configurator]
-oslo_service = "opentelemetry.distro.oslo_service:OsloServiceConfigurator"
+oslo_service = "opentelemetry.instrumentation.oslo_service.distro:OsloServiceConfigurator"
 
 [project.entry-points.opentelemetry_distro]
-oslo_service = "opentelemetry.distro.oslo_service:OsloServiceDistro"
+oslo_service = "opentelemetry.instrumentation.oslo_service.distro:OsloServiceDistro"
 
 [tool.hatch.version]
 path = "src/opentelemetry/instrumentation/oslo_service/version.py"
