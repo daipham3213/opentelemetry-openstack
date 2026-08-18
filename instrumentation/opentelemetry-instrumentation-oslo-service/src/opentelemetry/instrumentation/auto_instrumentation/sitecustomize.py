@@ -1,24 +1,15 @@
-import os
+try:
+    from opentelemetry.instrumentation import _oslo_service_eventlet
 
-from opentelemetry.instrumentation.auto_instrumentation import initialize
+    # Patch before importing ``initialize`` -- that import pulls in the socket
+    # stack, which the eventlet patch must precede.
+    _oslo_service_eventlet.try_patch()
+except ImportError:
+    # No eventlet, no patch. This is a no-op, not an error.
+    pass
 
-#: Opt-in flag: when ``"true"`` (case-insensitive), eventlet is monkey-patched.
-OTEL_PYTHON_EVENTLET_MONKEY_PATCH = "OTEL_PYTHON_EVENTLET_MONKEY_PATCH"
-
-#: Backend forced for oslo.service once eventlet has been patched.
-OTEL_PYTHON_OSLO_SERVICE_BACKEND = "OTEL_PYTHON_OSLO_SERVICE_BACKEND"
-
-
-flag = os.environ.get(OTEL_PYTHON_EVENTLET_MONKEY_PATCH) or "false"
-if flag.strip().lower() == "true":
-    try:
-        eventlet = __import__("eventlet")
-        eventlet.monkey_patch()
-        # Forced (not ``setdefault``): a stale threading value would
-        # re-introduce the fork/socket mismatch the patch prevents.
-        os.environ[OTEL_PYTHON_OSLO_SERVICE_BACKEND] = "eventlet"
-    except ImportError:
-        pass
-
+from opentelemetry.instrumentation.auto_instrumentation import (  # noqa: E402
+    initialize,
+)
 
 initialize()

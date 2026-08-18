@@ -31,11 +31,6 @@ shapes of primitive need two shapes of wrapper:
 Not handled: stdlib ``concurrent.futures`` pools (use
 ``opentelemetry-instrumentation-threading``), ``threading.Timer`` / ``Thread``
 subclasses that override ``run``, and cross-process work.
-
-Every wrapper is a ``wrapt``-style ``(wrapped, instance, args, kwargs)`` and
-never raises on its own account: context propagation must not break the host
-application, so the wrapped callable is always invoked and any attached context
-is always detached.
 """
 
 import functools
