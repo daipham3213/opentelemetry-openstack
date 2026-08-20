@@ -1,5 +1,5 @@
 try:
-    from opentelemetry.instrumentation import _oslo_service_eventlet
+    import _oslo_service_eventlet
 
     # Patch before importing ``initialize`` -- that import pulls in the socket
     # stack, which the eventlet patch must precede.
