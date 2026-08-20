@@ -3,17 +3,10 @@
 import os
 
 from opentelemetry.distro import OpenTelemetryConfigurator, OpenTelemetryDistro
-from opentelemetry.instrumentation._oslo_service_eventlet import (
-    OTEL_PYTHON_EVENTLET_MONKEY_PATCH,
-    OTEL_PYTHON_OSLO_SERVICE_BACKEND,
-    try_patch,
-)
 
 __all__ = [
     "OsloServiceConfigurator",
     "OsloServiceDistro",
-    "OTEL_PYTHON_EVENTLET_MONKEY_PATCH",
-    "OTEL_PYTHON_OSLO_SERVICE_BACKEND",
 ]
 
 
@@ -32,8 +25,6 @@ class OsloServiceConfigurator(OpenTelemetryConfigurator):
             :meth:`OpenTelemetryConfigurator._configure`.
         :returns: ``None``.
         """
-        try_patch()
-
         super()._configure(**kwargs)
 
 
@@ -52,8 +43,6 @@ class OsloServiceDistro(OpenTelemetryDistro):
             :meth:`OpenTelemetryDistro._configure`.
         :returns: ``None``.
         """
-        try_patch()
-
         super()._configure(**kwargs)
 
         # Ensure this distro's own configurator (which patches defensively too)
