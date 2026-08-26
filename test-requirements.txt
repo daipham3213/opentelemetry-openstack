@@ -1,6 +1,7 @@
 pytest
 opentelemetry-sdk
 opentelemetry-test-utils
-# runtime dep of oslo.service's threading backend; lets the oslo-service
+# runtime deps of oslo.service's threading backend; let the oslo-service
 # backend-selection tests exercise threading instead of skipping.
 cotyledon
+futurist
