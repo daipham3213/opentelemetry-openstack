@@ -10,8 +10,13 @@ Rather than patching atom methods, the instrumentor uses TaskFlow's native
 notification API: it patches :meth:`taskflow.engines.base.Engine.__init__` so
 that every engine -- however it is constructed (``engines.run``,
 ``engines.load``, a factory, or directly) -- gets an OpenTelemetry listener
-attached to its flow and atom notifiers. See
-:mod:`opentelemetry.instrumentation.taskflow.listener` for the listener itself.
+attached to its flow and atom notifiers.
+
+Notifications bracket an atom from the engine thread, not from inside it, so on
+top of the listener the action engine's atom-body functions are wrapped to make
+each atom's span current in the thread that actually runs the body -- otherwise
+spans opened inside ``execute()``/``revert()`` would start their own trace. See
+:mod:`opentelemetry.instrumentation.taskflow.listener` for both halves.
 
 Usage::
 
@@ -60,6 +65,7 @@ class TaskflowInstrumentor(BaseInstrumentor):
     """An instrumentor for TaskFlow engines."""
 
     _original_engine_init = None
+    _original_atom_bodies = None
 
     def instrumentation_dependencies(self) -> Collection[str]:
         return _instruments
@@ -81,6 +87,13 @@ class TaskflowInstrumentor(BaseInstrumentor):
             schema_url="https://opentelemetry.io/schemas/1.11.0",
         )
 
+        listener = import_module(
+            "opentelemetry.instrumentation.taskflow.listener"
+        )
+        TaskflowInstrumentor._original_atom_bodies = (
+            listener.patch_atom_bodies()
+        )
+
         TaskflowInstrumentor._original_engine_init = (
             engine_base.Engine.__init__
         )
@@ -99,6 +112,14 @@ class TaskflowInstrumentor(BaseInstrumentor):
             TaskflowInstrumentor._original_engine_init
         )
         TaskflowInstrumentor._original_engine_init = None
+
+        listener = import_module(
+            "opentelemetry.instrumentation.taskflow.listener"
+        )
+        listener.unpatch_atom_bodies(
+            TaskflowInstrumentor._original_atom_bodies
+        )
+        TaskflowInstrumentor._original_atom_bodies = None
 
 
 __all__ = ["TaskflowInstrumentor"]
