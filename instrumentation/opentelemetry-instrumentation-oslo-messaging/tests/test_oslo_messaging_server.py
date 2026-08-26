@@ -120,7 +120,8 @@ def test_rpc_dispatch_creates_consumer_span(instrumentor, span_exporter):
     # SimpleNamespace is not a driver message, so this is the fallback; the
     # broker-derived values are covered below.
     assert span.attributes["messaging.system"] == "oslo.messaging"
-    assert span.attributes["messaging.operation.name"] == "process"
+    assert span.attributes["messaging.operation"] == "receive"
+    assert span.attributes["messaging.operation.name"] == "receive"
     assert span.attributes["rpc.system"] == "oslo.messaging"
     assert span.attributes["rpc.method"] == "echo"
 
@@ -139,7 +140,8 @@ def test_notification_dispatch_creates_consumer_span(
     span = spans[0]
     assert span.name == "event.type receive"
     assert span.kind == SpanKind.CONSUMER
-    assert span.attributes["messaging.operation.name"] == "process"
+    assert span.attributes["messaging.operation"] == "receive"
+    assert span.attributes["messaging.operation.name"] == "receive"
     assert (
         span.attributes["oslo_messaging.notification.event_type"]
         == "event.type"
@@ -312,3 +314,66 @@ def test_notification_consumer_span_records_broker(tracer, span_exporter):
 
     span = span_exporter.get_finished_spans()[0]
     assert span.attributes["messaging.system"] == "rabbitmq"
+
+
+def test_rpc_consumer_splits_namespace_into_rpc_service(
+    instrumentor, tracer, span_exporter
+):
+    # rpc.method is the bare method and the namespace goes to rpc.service --
+    # what the conventions describe and what oslo.messaging's own tracing
+    # records. The dotted form still names the span.
+    incoming = _rpc_incoming("echo")
+    incoming.message["namespace"] = "baremetal"
+
+    decorators.rpc_server_wrapper(tracer)(
+        lambda *args, **kwargs: None, None, (incoming,), {}
+    )
+
+    span = span_exporter.get_finished_spans()[0]
+    assert span.name == "baremetal.echo receive"
+    assert span.attributes["rpc.method"] == "echo"
+    assert span.attributes["rpc.service"] == "baremetal"
+
+
+def test_rpc_consumer_omits_rpc_service_without_a_namespace(
+    instrumentor, span_exporter
+):
+    dispatcher = RPCDispatcher([_RpcEndpoint()], NoOpSerializer())
+
+    dispatcher.dispatch(_rpc_incoming("echo"))
+
+    span = span_exporter.get_finished_spans()[0]
+    assert span.name == "echo receive"
+    assert "rpc.service" not in span.attributes
+
+
+@pytest.mark.parametrize(
+    "build_incoming",
+    [_rpc_incoming, lambda *a, **kw: _notification_incoming(**kw)],
+)
+def test_consumer_records_openstack_request_id(
+    instrumentor, tracer, span_exporter, build_incoming
+):
+    # oslo.messaging's own tracing records the request id under
+    # openstack.request_id; conversation_id is the portable equivalent.
+    incoming = build_incoming("echo", ctxt={"request_id": "req-abc"})
+    wrapper = (
+        decorators.rpc_server_wrapper(tracer)
+        if "method" in incoming.message
+        else decorators.notification_server_wrapper(tracer)
+    )
+
+    wrapper(lambda *args, **kwargs: None, None, (incoming,), {})
+
+    span = span_exporter.get_finished_spans()[0]
+    assert span.attributes["openstack.request_id"] == "req-abc"
+    assert span.attributes["messaging.message.conversation_id"] == "req-abc"
+
+
+def test_consumer_omits_request_id_when_absent(instrumentor, span_exporter):
+    dispatcher = RPCDispatcher([_RpcEndpoint()], NoOpSerializer())
+
+    dispatcher.dispatch(_rpc_incoming("echo"))
+
+    span = span_exporter.get_finished_spans()[0]
+    assert "openstack.request_id" not in span.attributes
