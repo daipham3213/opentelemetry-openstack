@@ -1,13 +1,13 @@
 """Eventlet monkey-patch, factored out so it can run at the earliest hook."""
 
 import os
-import re
 import warnings
 
 __all__ = [
     "OTEL_PYTHON_EVENTLET_MONKEY_PATCH",
     "OTEL_PYTHON_OSLO_SERVICE_BACKEND",
     "try_patch",
+    "wrap_initialize",
 ]
 
 #: Opt-in flag: when ``"true"`` (case-insensitive), eventlet is monkey-patched.
@@ -32,26 +32,6 @@ def try_patch() -> None:
     if flag.strip().lower() != "true":
         return
 
-    filedir = os.path.dirname(os.path.abspath(__file__))
-
-    python_path = os.environ.get("PYTHONPATH")
-    auto_instrumentation_path_was_present = (
-        python_path is not None
-        and filedir in python_path.split(os.path.pathsep)
-    )
-
-    # Remove the auto-instrumentation path during initialization to prevent
-    # auto-instrumentation from executing in subprocesses spawned during this phase.
-    # This suppression is performed to avoid creating a recursive loop scenario
-    # where subprocesses spawned in the initialization phase execute the
-    # initialization phase again, spawning more subprocesses.
-    if python_path is not None:
-        os.environ["PYTHONPATH"] = re.sub(
-            rf"{re.escape(filedir)}{os.path.pathsep}(?!$)",
-            "",
-            python_path,
-        )
-
     try:
         eventlet = __import__("eventlet")
         eventlet.monkey_patch()
@@ -65,10 +45,19 @@ def try_patch() -> None:
             "monkey-patching.",
             stacklevel=2,
         )
-    finally:
-        if auto_instrumentation_path_was_present:
-            current = os.environ.get("PYTHONPATH", "")
-            if filedir not in current.split(os.path.pathsep):
-                os.environ["PYTHONPATH"] = (
-                    filedir + os.path.pathsep + current if current else filedir
-                )
+
+
+def wrap_initialize(auto_instrumentation_module) -> None:
+    """Fold :func:`try_patch` into ``auto_instrumentation_module._initialize``.
+
+    :param auto_instrumentation_module: the already-imported
+        ``opentelemetry.instrumentation.auto_instrumentation`` module.
+    :returns: ``None``.
+    """
+    original = auto_instrumentation_module._initialize
+
+    def _initialize_with_eventlet_patch(*args, **kwargs):
+        try_patch()
+        return original(*args, **kwargs)
+
+    auto_instrumentation_module._initialize = _initialize_with_eventlet_patch
