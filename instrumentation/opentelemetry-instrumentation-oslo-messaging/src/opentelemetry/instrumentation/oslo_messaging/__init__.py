@@ -28,6 +28,10 @@ producer, extracting context from the incoming message:
 
 Message payloads are never recorded as span attributes.
 
+Spans on both sides carry ``messaging.system`` set to the broker behind the
+configured ``transport_url`` (``rabbit://`` -> ``rabbitmq``, ``kafka://`` ->
+``kafka``), while ``rpc.system`` remains ``oslo.messaging``.
+
 **Trace continuity across concurrency.** Keeping a consumer's trace on work it
 hands to a greenthread or worker thread (as nova-compute's
 ``build_and_run_instance`` does right after dispatch) is the job of

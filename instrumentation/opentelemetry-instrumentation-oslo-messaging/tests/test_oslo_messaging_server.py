@@ -8,6 +8,7 @@ that a span parents to the producer via the trace context carried on the wire.
 from types import SimpleNamespace
 
 import pytest
+from oslo_messaging._drivers import amqpdriver, impl_fake
 from oslo_messaging.notify.dispatcher import NotificationDispatcher
 from oslo_messaging.rpc.dispatcher import RPCDispatcher
 from oslo_messaging.serializer import NoOpSerializer
@@ -116,6 +117,8 @@ def test_rpc_dispatch_creates_consumer_span(instrumentor, span_exporter):
     span = spans[0]
     assert span.name == "echo receive"
     assert span.kind == SpanKind.CONSUMER
+    # SimpleNamespace is not a driver message, so this is the fallback; the
+    # broker-derived values are covered below.
     assert span.attributes["messaging.system"] == "oslo.messaging"
     assert span.attributes["messaging.operation.name"] == "process"
     assert span.attributes["rpc.system"] == "oslo.messaging"
@@ -263,3 +266,49 @@ def test_next_message_without_traceparent_is_not_adopted_into_previous_trace(
     assert f"{failed.context.trace_id:032x}" == "1" * 32
     assert ok.context.trace_id != failed.context.trace_id
     assert ok.parent is None
+
+
+class _ForkedRabbitMessage(amqpdriver.AMQPIncomingMessage):
+    """Stands in for an out-of-tree driver subclassing an in-tree message."""
+
+    def __init__(self):
+        pass
+
+
+@pytest.mark.parametrize(
+    "message_class,expected",
+    [
+        (amqpdriver.AMQPIncomingMessage, "rabbitmq"),
+        (amqpdriver.NotificationAMQPIncomingMessage, "rabbitmq"),
+        (_ForkedRabbitMessage, "rabbitmq"),  # resolved through the MRO
+        (impl_fake.FakeIncomingMessage, "fake"),
+        (SimpleNamespace, "oslo.messaging"),  # not a driver message
+    ],
+)
+def test_consumer_span_records_broker_the_message_arrived_from(
+    tracer, span_exporter, message_class, expected
+):
+    # Dispatchers never see the Transport, so the driver-specific class of the
+    # message they are handed is what identifies the broker.
+    wrapper = decorators.rpc_server_wrapper(tracer)
+    incoming = message_class.__new__(message_class)
+    incoming.ctxt = {}
+    incoming.message = {"method": "echo"}
+
+    wrapper(lambda *args, **kwargs: None, None, (incoming,), {})
+
+    span = span_exporter.get_finished_spans()[0]
+    assert span.attributes["messaging.system"] == expected
+    assert span.attributes["rpc.system"] == "oslo.messaging"
+
+
+def test_notification_consumer_span_records_broker(tracer, span_exporter):
+    wrapper = decorators.notification_server_wrapper(tracer)
+    incoming = object.__new__(amqpdriver.NotificationAMQPIncomingMessage)
+    incoming.ctxt = {}
+    incoming.message = {"event_type": "some.event", "priority": "info"}
+
+    wrapper(lambda *args, **kwargs: None, None, (incoming,), {})
+
+    span = span_exporter.get_finished_spans()[0]
+    assert span.attributes["messaging.system"] == "rabbitmq"

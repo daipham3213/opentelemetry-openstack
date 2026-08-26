@@ -17,6 +17,15 @@ The instrumentation has two thin halves:
   ``incoming.ctxt``. The span is scoped to the dispatch call, so no context is
   attached beyond message handling.
 
+``messaging.system`` names the *broker* the configured driver talks to
+(``rabbitmq``, ``kafka``, ...), not the client library -- that is what the
+semantic conventions ask for, and it is what makes a trace comparable with
+spans from non-OpenStack producers on the same broker. It is resolved per span:
+from the transport's own parsed URL on the producer side, and from the
+driver-specific class of the received message on the consumer side, which never
+sees a transport. ``rpc.system`` stays ``oslo.messaging`` -- that genuinely is
+the RPC system, whichever broker carries it.
+
 Every wrapper is a ``wrapt``-style function ``(wrapped, instance, args, kwargs)``
 and never raises on its own account: telemetry must not break the host
 application, so attribute extraction is guarded against the narrow expected
@@ -32,6 +41,9 @@ from opentelemetry.semconv._incubating.attributes import (
     messaging_attributes,
     rpc_attributes,
 )
+from opentelemetry.semconv._incubating.attributes.messaging_attributes import (
+    MessagingSystemValues,
+)
 from opentelemetry.semconv.trace import MessagingOperationValues
 from opentelemetry.trace import SpanKind, Tracer
 from opentelemetry.trace.span import Span
@@ -42,8 +54,33 @@ __all__ = [
     "notification_server_wrapper",
 ]
 
-#: ``messaging.system`` / ``rpc.system`` value identifying this transport.
-MESSAGING_SYSTEM = "oslo.messaging"
+#: ``rpc.system`` value: the RPC system *is* oslo.messaging, whichever broker
+#: it is configured to talk to.
+RPC_SYSTEM = "oslo.messaging"
+
+#: ``messaging.system`` value used when the configured driver cannot be
+#: determined. The broker is the right answer here (see
+#: :func:`_messaging_system_for_driver`), so this is only a last resort.
+DEFAULT_MESSAGING_SYSTEM = "oslo.messaging"
+
+#: oslo.messaging driver names whose semantic-convention ``messaging.system``
+#: value differs from the driver name itself. Anything else is reported
+#: verbatim: ``kafka`` is already the conventional value, and ``amqp`` (AMQP
+#: 1.0) and ``fake`` have no conventional value but name themselves better than
+#: any fallback would.
+_MESSAGING_SYSTEM_BY_DRIVER = {
+    "rabbit": MessagingSystemValues.RABBITMQ.value,
+    "kombu": MessagingSystemValues.RABBITMQ.value,  # entry-point alias
+}
+
+#: Driver module of an ``IncomingMessage``, mapped to the driver name. The
+#: consumer side never sees a ``Transport``, so the class of the message it is
+#: handed is what identifies the broker it arrived from.
+_DRIVER_BY_INCOMING_MODULE = {
+    "oslo_messaging._drivers.amqpdriver": "rabbit",
+    "oslo_messaging._drivers.impl_kafka": "kafka",
+    "oslo_messaging._drivers.impl_fake": "fake",
+}
 
 # oslo.messaging-specific span attributes (no semantic-convention equivalent).
 ATTR_NOTIFICATION_PRIORITY = "oslo_messaging.notification.priority"
@@ -70,6 +107,54 @@ def _arg(args: tuple, index: int, kwargs: dict, name: str) -> Any:
     if len(args) > index:
         return args[index]
     return kwargs.get(name)
+
+
+def _messaging_system_for_driver(driver: Optional[str]) -> str:
+    """Map an oslo.messaging driver name to a ``messaging.system`` value.
+
+    :param driver: The driver name from the transport URL (``rabbit``,
+        ``kafka``, ...), or ``None`` when it could not be determined. A
+        compound scheme (``rabbit+ssl``) is reduced to its driver the same way
+        oslo.messaging itself resolves one.
+    :returns: The ``messaging.system`` value to record.
+    """
+    if not driver:
+        return DEFAULT_MESSAGING_SYSTEM
+    driver = driver.split("+")[0]
+    return _MESSAGING_SYSTEM_BY_DRIVER.get(driver, driver)
+
+
+def _producer_messaging_system(transport: Any) -> str:
+    """The ``messaging.system`` of the transport a message is being sent on.
+
+    Read from the transport's own parsed URL, so it reflects the driver this
+    transport was actually configured with -- a service whose notifications go
+    to a different broker than its RPC gets the right value on each.
+
+    :param transport: The ``Transport`` instance handling the send.
+    :returns: The ``messaging.system`` value to record.
+    """
+    driver = getattr(transport, "_driver", None)
+    url = getattr(driver, "_url", None)
+    return _messaging_system_for_driver(getattr(url, "transport", None))
+
+
+def _consumer_messaging_system(incoming: Any) -> str:
+    """The ``messaging.system`` a received message arrived from.
+
+    Dispatchers are handed a driver-specific ``IncomingMessage`` and never see
+    the transport, so the message's own class is what identifies the broker.
+
+    :param incoming: The ``IncomingMessage`` being dispatched.
+    :returns: The ``messaging.system`` value to record.
+    """
+    # Walk the MRO, not just the concrete class: a driver may subclass another
+    # driver's message type (and out-of-tree drivers subclass the in-tree ones).
+    for klass in type(incoming).__mro__:
+        driver = _DRIVER_BY_INCOMING_MODULE.get(klass.__module__)
+        if driver is not None:
+            return _messaging_system_for_driver(driver)
+    return DEFAULT_MESSAGING_SYSTEM
 
 
 def _rpc_method(message: Mapping) -> Optional[str]:
@@ -133,6 +218,7 @@ def inject_trace(tracer: Tracer, is_notification: bool = False):
 
         span = tracer.start_span(name=dest, kind=SpanKind.PRODUCER)
         if span.is_recording():
+            system = _producer_messaging_system(instance)
             span.set_attribute(
                 messaging_attributes.MESSAGING_DESTINATION_TEMPLATE, True
             )
@@ -143,13 +229,17 @@ def inject_trace(tracer: Tracer, is_notification: bool = False):
             if is_notification:
                 _set_notification_attributes(
                     span,
+                    system=system,
                     event_type=message.get("event_type"),
                     priority=message.get("priority"),
                     publisher_id=message.get("publisher_id"),
                 )
             else:
                 _set_rpc_attributes(
-                    span, ctxt=ctxt, method=_rpc_method(message)
+                    span,
+                    ctxt=ctxt,
+                    method=_rpc_method(message),
+                    system=system,
                 )
 
         with trace.use_span(span, end_on_exit=True):
@@ -162,17 +252,20 @@ def inject_trace(tracer: Tracer, is_notification: bool = False):
     return inject_wrapper
 
 
-def _set_rpc_attributes(span: Span, ctxt: dict, method: Optional[str]) -> None:
+def _set_rpc_attributes(
+    span: Span, ctxt: dict, method: Optional[str], system: str
+) -> None:
     """Record RPC span attributes (shared by the producer and consumer sides).
 
     :param span: The recording span to enrich.
     :param method: The remote method being sent/handled, if known.
+    :param system: The ``messaging.system`` value for the broker in use.
     """
-    span.set_attribute(messaging_attributes.MESSAGING_SYSTEM, MESSAGING_SYSTEM)
+    span.set_attribute(messaging_attributes.MESSAGING_SYSTEM, system)
     span.set_attribute(
         messaging_attributes.MESSAGING_OPERATION_NAME, _OP_PROCESS
     )
-    span.set_attribute(rpc_attributes.RPC_SYSTEM, MESSAGING_SYSTEM)
+    span.set_attribute(rpc_attributes.RPC_SYSTEM, RPC_SYSTEM)
     if method is not None:
         span.set_attribute(rpc_attributes.RPC_METHOD, str(method))
     if isinstance(ctxt, Mapping) and (request_id := ctxt.get("request_id")):
@@ -185,6 +278,7 @@ def _set_rpc_attributes(span: Span, ctxt: dict, method: Optional[str]) -> None:
 def _set_notification_attributes(
     span: Span,
     *,
+    system: str,
     event_type: Optional[str],
     priority: Optional[str],
     publisher_id: Optional[str],
@@ -192,11 +286,12 @@ def _set_notification_attributes(
     """Record notification consumer span attributes (never the payload).
 
     :param span: The recording span to enrich.
+    :param system: The ``messaging.system`` value for the broker in use.
     :param event_type: The notification event type, if known.
     :param priority: The notification priority, if known.
     :param publisher_id: The publisher identifier, if known.
     """
-    span.set_attribute(messaging_attributes.MESSAGING_SYSTEM, MESSAGING_SYSTEM)
+    span.set_attribute(messaging_attributes.MESSAGING_SYSTEM, system)
     span.set_attribute(
         messaging_attributes.MESSAGING_OPERATION_NAME, _OP_PROCESS
     )
@@ -247,7 +342,12 @@ def rpc_server_wrapper(tracer: Tracer) -> Wrapper:
         token = context.attach(span_ctx)
         try:
             span = tracer.start_span(name=dest, kind=SpanKind.CONSUMER)
-            _set_rpc_attributes(span, ctxt=ctxt, method=rpc_method)
+            _set_rpc_attributes(
+                span,
+                ctxt=ctxt,
+                method=rpc_method,
+                system=_consumer_messaging_system(incoming),
+            )
             if message_id := message.get("msg_id"):
                 span.set_attribute(
                     messaging_attributes.MESSAGING_MESSAGE_ID, message_id
@@ -311,6 +411,7 @@ def notification_server_wrapper(tracer: Tracer) -> Wrapper:
             span = tracer.start_span(name=dest, kind=SpanKind.CONSUMER)
             _set_notification_attributes(
                 span,
+                system=_consumer_messaging_system(incoming),
                 event_type=message.get("event_type"),
                 priority=message.get("priority"),
                 publisher_id=message.get("publisher_id"),
