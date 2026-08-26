@@ -233,32 +233,35 @@ def rpc_server_wrapper(tracer: Tracer) -> Wrapper:
         if not span_ctx:
             span_ctx = context.get_current()
 
-        token = context.attach(span_ctx)
-
         rpc_method = message.get("method", "")
         namespace = message.get("namespace", "")
         if namespace:
             rpc_method = f"{namespace}.{rpc_method}"
         dest = f"{rpc_method} {MessagingOperationValues.RECEIVE.value}"
 
-        span = tracer.start_span(name=dest, kind=SpanKind.CONSUMER)
-        _set_rpc_attributes(span, ctxt=ctxt, method=rpc_method)
-        if message_id := message.get("msg_id"):
+        # Detach in ``finally``: an RPC handler raising is routine (client
+        # errors, ``ExpectedException``, timeouts), and executors hand messages
+        # to a *pool* of threads or greenthreads. Leaving the message context
+        # attached would pin that worker to a finished message's trace, and the
+        # next message without a ``traceparent`` would inherit it.
+        token = context.attach(span_ctx)
+        try:
+            span = tracer.start_span(name=dest, kind=SpanKind.CONSUMER)
+            _set_rpc_attributes(span, ctxt=ctxt, method=rpc_method)
+            if message_id := message.get("msg_id"):
+                span.set_attribute(
+                    messaging_attributes.MESSAGING_MESSAGE_ID, message_id
+                )
+
             span.set_attribute(
-                messaging_attributes.MESSAGING_MESSAGE_ID, message_id
+                messaging_attributes.MESSAGING_OPERATION,
+                MessagingOperationValues.RECEIVE.value,
             )
 
-        span.set_attribute(
-            messaging_attributes.MESSAGING_OPERATION,
-            MessagingOperationValues.RECEIVE.value,
-        )
-
-        with trace.use_span(span, end_on_exit=True):
-            result = wrapped(*args, **kwargs)
-
-        if token:
+            with trace.use_span(span, end_on_exit=True):
+                return wrapped(*args, **kwargs)
+        finally:
             context.detach(token)
-        return result
 
     return wrapper
 
@@ -298,33 +301,33 @@ def notification_server_wrapper(tracer: Tracer) -> Wrapper:
         if not span_ctx:
             span_ctx = context.get_current()
 
-        token = context.attach(span_ctx)
-
         event_type = message.get("event_type", "")
         dest = f"{event_type} {MessagingOperationValues.RECEIVE.value}"
 
-        span = tracer.start_span(name=dest, kind=SpanKind.CONSUMER)
-        _set_notification_attributes(
-            span,
-            event_type=message.get("event_type"),
-            priority=message.get("priority"),
-            publisher_id=message.get("publisher_id"),
-        )
-        if message_id := message.get("message_id"):
+        # See ``rpc_server_wrapper``: the attach has to be undone even when the
+        # handler raises, or a pooled worker keeps the finished message's trace.
+        token = context.attach(span_ctx)
+        try:
+            span = tracer.start_span(name=dest, kind=SpanKind.CONSUMER)
+            _set_notification_attributes(
+                span,
+                event_type=message.get("event_type"),
+                priority=message.get("priority"),
+                publisher_id=message.get("publisher_id"),
+            )
+            if message_id := message.get("message_id"):
+                span.set_attribute(
+                    messaging_attributes.MESSAGING_MESSAGE_ID, message_id
+                )
+
             span.set_attribute(
-                messaging_attributes.MESSAGING_MESSAGE_ID, message_id
+                messaging_attributes.MESSAGING_OPERATION,
+                MessagingOperationValues.RECEIVE.value,
             )
 
-        span.set_attribute(
-            messaging_attributes.MESSAGING_OPERATION,
-            MessagingOperationValues.RECEIVE.value,
-        )
-
-        with trace.use_span(span, end_on_exit=True):
-            result = wrapped(*args, **kwargs)
-
-        if token:
+            with trace.use_span(span, end_on_exit=True):
+                return wrapped(*args, **kwargs)
+        finally:
             context.detach(token)
-        return result
 
     return wrapper

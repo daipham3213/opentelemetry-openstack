@@ -13,9 +13,10 @@ from oslo_messaging.rpc.dispatcher import RPCDispatcher
 from oslo_messaging.serializer import NoOpSerializer
 
 from opentelemetry import context as context_api
-from opentelemetry import propagate
+from opentelemetry import propagate, trace
 from opentelemetry.instrumentation.oslo_messaging import (
     OsloMessagingInstrumentor,
+    decorators,
 )
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -189,3 +190,76 @@ def test_uninstrument_restores_dispatch(instrumentor, span_exporter):
     dispatcher.dispatch(_rpc_incoming("echo"))
 
     assert span_exporter.get_finished_spans() == ()
+
+
+def _traceparent(trace_id="1" * 32, span_id="2" * 16):
+    return {"traceparent": f"00-{trace_id}-{span_id}-01"}
+
+
+def test_rpc_dispatch_does_not_leak_context_when_endpoint_raises(
+    instrumentor, span_exporter
+):
+    # Executors hand messages to a pool of reused threads/greenthreads, so a
+    # context left attached by a raising handler would pin that worker to a
+    # finished message's trace -- and a later message arriving without a
+    # traceparent would be adopted into it. Endpoints raising is routine.
+    dispatcher = RPCDispatcher([_RpcEndpoint()], NoOpSerializer())
+
+    before = trace.get_current_span().get_span_context()
+
+    with pytest.raises(RuntimeError, match="boom"):
+        dispatcher.dispatch(_rpc_incoming("boom", ctxt=_traceparent()))
+
+    after = trace.get_current_span().get_span_context()
+    assert after.trace_id == before.trace_id
+    assert after.span_id == before.span_id
+
+
+@pytest.mark.parametrize(
+    "build_wrapper",
+    [decorators.rpc_server_wrapper, decorators.notification_server_wrapper],
+)
+def test_consumer_wrapper_detaches_context_when_dispatch_raises(
+    tracer, build_wrapper
+):
+    # The notification dispatcher swallows callback errors, so drive the
+    # wrapper contract directly: whatever it wraps, a raised exception must
+    # still leave the context as it was found.
+    wrapper = build_wrapper(tracer)
+    incoming = SimpleNamespace(
+        ctxt=_traceparent(), message={"method": "m", "event_type": "e"}
+    )
+
+    def raising(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    before = trace.get_current_span().get_span_context()
+
+    with pytest.raises(RuntimeError, match="boom"):
+        wrapper(raising, None, (incoming,), {})
+
+    after = trace.get_current_span().get_span_context()
+    assert after.trace_id == before.trace_id
+    assert after.span_id == before.span_id
+
+
+def test_next_message_without_traceparent_is_not_adopted_into_previous_trace(
+    instrumentor, span_exporter
+):
+    dispatcher = RPCDispatcher([_RpcEndpoint()], NoOpSerializer())
+
+    with pytest.raises(RuntimeError, match="boom"):
+        dispatcher.dispatch(_rpc_incoming("boom", ctxt=_traceparent()))
+
+    # Same worker, next message, no wire context: it must start its own trace.
+    dispatcher.dispatch(_rpc_incoming("echo"))
+
+    failed, ok = (
+        s
+        for s in sorted(
+            span_exporter.get_finished_spans(), key=lambda s: s.start_time
+        )
+    )
+    assert f"{failed.context.trace_id:032x}" == "1" * 32
+    assert ok.context.trace_id != failed.context.trace_id
+    assert ok.parent is None
