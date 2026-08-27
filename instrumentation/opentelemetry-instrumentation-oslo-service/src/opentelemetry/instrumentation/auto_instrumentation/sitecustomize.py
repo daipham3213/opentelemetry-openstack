@@ -6,7 +6,9 @@ except ImportError:
 
 if _oslo_service_eventlet is not None:
     # Patch before importing auto_instrumentation -- that import pulls in the
-    # socket stack, which the eventlet patch must precede.
+    # socket stack, which the eventlet patch must precede. This also installs
+    # the fork hook and hands the SDK real threads, both gated on the same
+    # opt-in: without it we leave the process entirely alone.
     _oslo_service_eventlet.try_patch()
 
 import os  # noqa: E402
@@ -19,11 +21,5 @@ import os  # noqa: E402
 os.environ.setdefault("OTEL_PYTHON_DISTRO", "oslo_service")
 
 from opentelemetry.instrumentation import auto_instrumentation  # noqa: E402
-
-if _oslo_service_eventlet is not None:
-    # Fold the patch into auto_instrumentation._initialize itself, so a later
-    # call to initialize() -- re-entrant, or made directly by application
-    # code -- re-applies it too.
-    _oslo_service_eventlet.wrap_initialize(auto_instrumentation)
 
 auto_instrumentation.initialize()

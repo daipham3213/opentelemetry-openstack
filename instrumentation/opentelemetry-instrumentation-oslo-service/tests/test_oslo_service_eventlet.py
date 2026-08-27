@@ -2,11 +2,10 @@
 
 ``eventlet.monkey_patch()`` only takes full effect if it runs before ``socket``
 / ``ssl`` are imported. ``sitecustomize`` covers that at interpreter startup by
-calling :func:`try_patch` before importing ``auto_instrumentation`` at all; on
-top of that, :func:`wrap_initialize` folds the patch into
-``auto_instrumentation._initialize`` itself, so a later call to
-``initialize()`` -- re-entrant, or made directly by application code -- still
-re-applies it. These tests pin both contracts so they cannot regress.
+calling :func:`try_patch` before importing ``auto_instrumentation`` at all,
+then :func:`register_forkhook` and :func:`unpatch_sdk` once it is imported and
+before ``initialize()`` builds the span processors. These tests pin each piece;
+``test_oslo_service_distro`` pins the wiring that orders them.
 """
 
 import os
@@ -108,46 +107,11 @@ def test_try_patch_warns_when_eventlet_missing(monkeypatch):
     )
 
 
-def test_wrap_initialize_patches_before_delegating(monkeypatch, fake_eventlet):
-    monkeypatch.setenv(
-        _oslo_service_eventlet.OTEL_PYTHON_EVENTLET_MONKEY_PATCH, "true"
-    )
-
-    manager = mock.Mock()
-    manager.attach_mock(fake_eventlet.monkey_patch, "monkey_patch")
-    original = mock.Mock(name="_initialize")
-    manager.attach_mock(original, "_initialize")
-
-    module = types.SimpleNamespace(_initialize=original)
-    _oslo_service_eventlet.wrap_initialize(module)
-
-    module._initialize(swallow_exceptions=True)
-    original.assert_called_once_with(swallow_exceptions=True)
-
-    called = [name for name, _, _ in manager.mock_calls]
-    assert called.index("monkey_patch") < called.index("_initialize")
-
-
-def test_wrap_initialize_reapplies_patch_on_each_call(
-    monkeypatch, fake_eventlet
-):
-    monkeypatch.setenv(
-        _oslo_service_eventlet.OTEL_PYTHON_EVENTLET_MONKEY_PATCH, "true"
-    )
-
-    module = types.SimpleNamespace(_initialize=mock.Mock())
-    _oslo_service_eventlet.wrap_initialize(module)
-
-    module._initialize()
-    module._initialize()
-    assert fake_eventlet.monkey_patch.call_count == 2
-
-
 @pytest.fixture(autouse=True)
 def fork_registrations(monkeypatch):
     """``os.register_at_fork`` cannot be undone, so keep the real one out of the
     test process and let each test start from "not yet registered"."""
-    monkeypatch.setattr(_oslo_service_eventlet, "_hub_reset_installed", False)
+    monkeypatch.setattr(_oslo_service_eventlet, "_forkhook_installed", False)
     registrations = []
     monkeypatch.setattr(
         _oslo_service_eventlet.os,
@@ -157,26 +121,26 @@ def fork_registrations(monkeypatch):
     return registrations
 
 
-def test_reset_hub_on_fork_installs_a_child_handler(
+def test_register_forkhook_installs_a_child_handler(
     fake_eventlet, fork_registrations
 ):
-    assert _oslo_service_eventlet.reset_hub_on_fork() is True
+    assert _oslo_service_eventlet.register_forkhook() is True
     assert len(fork_registrations) == 1
     assert set(fork_registrations[0]) == {"after_in_child"}
 
 
-def test_reset_hub_on_fork_installs_only_once(
+def test_register_forkhook_installs_only_once(
     fake_eventlet, fork_registrations
 ):
     """``os.register_at_fork`` has no unregister, so a second call must be a
     no-op rather than stacking another handler."""
-    _oslo_service_eventlet.reset_hub_on_fork()
-    assert _oslo_service_eventlet.reset_hub_on_fork() is True
+    _oslo_service_eventlet.register_forkhook()
+    assert _oslo_service_eventlet.register_forkhook() is True
     assert len(fork_registrations) == 1
 
 
 def test_hub_reset_drops_an_inherited_hub(fake_eventlet, fork_registrations):
-    _oslo_service_eventlet.reset_hub_on_fork()
+    _oslo_service_eventlet.register_forkhook()
     handler = fork_registrations[0]["after_in_child"]
 
     handler()
@@ -188,7 +152,7 @@ def test_hub_reset_leaves_a_child_without_a_live_hub_alone(
     fake_eventlet, fork_registrations
 ):
     """Inheriting eventlet is not the same as inheriting a running hub."""
-    _oslo_service_eventlet.reset_hub_on_fork()
+    _oslo_service_eventlet.register_forkhook()
     handler = fork_registrations[0]["after_in_child"]
     fake_eventlet.hubs._threadlocal = types.SimpleNamespace(hub=None)
 
@@ -203,7 +167,7 @@ def test_hub_reset_is_free_when_eventlet_was_never_imported(
     """The common case for a non-OpenStack process: no eventlet, no cost."""
     monkeypatch.delitem(sys.modules, "eventlet", raising=False)
     monkeypatch.delitem(sys.modules, "eventlet.hubs", raising=False)
-    assert _oslo_service_eventlet.reset_hub_on_fork() is True
+    assert _oslo_service_eventlet.register_forkhook() is True
 
     fork_registrations[0]["after_in_child"]()  # must not raise or import
 
@@ -212,27 +176,11 @@ def test_hub_reset_is_free_when_eventlet_was_never_imported(
 
 def test_hub_reset_never_raises_inside_fork(fake_eventlet, fork_registrations):
     """It runs inside os.fork(), in a child that may be about to exec."""
-    _oslo_service_eventlet.reset_hub_on_fork()
+    _oslo_service_eventlet.register_forkhook()
     handler = fork_registrations[0]["after_in_child"]
     fake_eventlet.hubs.use_hub.side_effect = RuntimeError("no hub for you")
 
     handler()  # must not propagate
-
-
-@pytest.mark.parametrize(("opted_in", "expected"), [("true", 1), ("false", 0)])
-def test_initialize_installs_hub_reset_with_the_patch(
-    monkeypatch, fake_eventlet, fork_registrations, opted_in, expected
-):
-    """It rides along with the monkey-patch: no patch from us, no handler."""
-    monkeypatch.setenv(
-        _oslo_service_eventlet.OTEL_PYTHON_EVENTLET_MONKEY_PATCH, opted_in
-    )
-    module = types.SimpleNamespace(_initialize=mock.Mock())
-    _oslo_service_eventlet.wrap_initialize(module)
-
-    module._initialize()
-
-    assert len(fork_registrations) == expected
 
 
 @pytest.fixture
@@ -301,3 +249,124 @@ def test_unset_pythonpath_stays_unset(monkeypatch, fake_eventlet, opted_in):
     _oslo_service_eventlet.try_patch()
 
     assert "PYTHONPATH" not in os.environ
+
+
+_SDK_NAMES = ("Event", "Lock", "RLock", "Thread")
+
+
+@pytest.fixture
+def sdk_modules():
+    """The two SDK modules that own a worker thread other threads signal.
+
+    Importing them for real pins the dotted paths and attribute names
+    :func:`unpatch_sdk` rebinds, which is the part that rots silently when the
+    SDK is upgraded.
+    """
+    from opentelemetry.sdk import _shared_internal  # noqa: PLC0415
+    from opentelemetry.sdk.metrics._internal import export  # noqa: PLC0415
+
+    saved_threading = _shared_internal.threading
+    saved = {name: getattr(export, name) for name in _SDK_NAMES}
+    yield _shared_internal, export
+    _shared_internal.threading = saved_threading
+    for name, value in saved.items():
+        setattr(export, name, value)
+
+
+@pytest.fixture
+def sentinel_threading(fake_eventlet):
+    """Stand-in for the unpatched threading, distinguishable by identity."""
+    module = types.ModuleType("threading_original")
+    for name in _SDK_NAMES:
+        setattr(module, name, type(name, (), {}))
+    fake_eventlet.patcher.original.return_value = module
+    return module
+
+
+def test_unpatch_sdk_rebinds_to_unpatched_threading(
+    sdk_modules, sentinel_threading
+):
+    shared, export = sdk_modules
+
+    assert _oslo_service_eventlet.unpatch_sdk() is True
+
+    # BatchProcessor takes Thread, Lock and Event off the module, so the whole
+    # module is rebound: a green Event signalled by a real thread is the bug.
+    assert shared.threading is sentinel_threading
+    for name in _SDK_NAMES:
+        assert getattr(export, name) is getattr(sentinel_threading, name)
+
+
+def test_unpatch_sdk_declines_a_non_module(fake_eventlet, sdk_modules):
+    """A mocked eventlet returns a Mock; writing that in breaks every exporter."""
+    shared, _export = sdk_modules
+    before = shared.threading
+    fake_eventlet.patcher.original.return_value = mock.MagicMock()
+
+    assert _oslo_service_eventlet.unpatch_sdk() is False
+    assert shared.threading is before
+
+
+def test_unpatch_sdk_no_op_without_eventlet(monkeypatch, sdk_modules):
+    shared, _export = sdk_modules
+    before = shared.threading
+    monkeypatch.setitem(sys.modules, "eventlet", None)
+
+    assert _oslo_service_eventlet.unpatch_sdk() is False
+    assert shared.threading is before
+
+
+def test_try_patch_installs_the_follow_ups_when_opted_in(
+    monkeypatch,
+    fake_eventlet,
+    fork_registrations,
+    sdk_modules,
+    sentinel_threading,
+):
+    shared, _export = sdk_modules
+    monkeypatch.setenv(
+        _oslo_service_eventlet.OTEL_PYTHON_EVENTLET_MONKEY_PATCH, "true"
+    )
+
+    _oslo_service_eventlet.try_patch()
+
+    assert len(fork_registrations) == 1
+    assert shared.threading is sentinel_threading
+
+
+def test_try_patch_leaves_the_process_alone_without_opt_in(
+    monkeypatch,
+    fake_eventlet,
+    fork_registrations,
+    sdk_modules,
+    sentinel_threading,
+):
+    """Opting out means opting out of all of it, not just the monkey-patch."""
+    shared, _export = sdk_modules
+    before = shared.threading
+    monkeypatch.delenv(
+        _oslo_service_eventlet.OTEL_PYTHON_EVENTLET_MONKEY_PATCH,
+        raising=False,
+    )
+
+    _oslo_service_eventlet.try_patch()
+
+    assert fork_registrations == []
+    assert shared.threading is before
+
+
+def test_try_patch_skips_the_follow_ups_when_eventlet_is_missing(
+    monkeypatch, fork_registrations, sdk_modules
+):
+    shared, _export = sdk_modules
+    before = shared.threading
+    monkeypatch.setenv(
+        _oslo_service_eventlet.OTEL_PYTHON_EVENTLET_MONKEY_PATCH, "true"
+    )
+    monkeypatch.setitem(sys.modules, "eventlet", None)
+
+    with pytest.warns(UserWarning, match="eventlet is not installed"):
+        _oslo_service_eventlet.try_patch()
+
+    assert fork_registrations == []
+    assert shared.threading is before

@@ -2,15 +2,16 @@
 
 import os
 import sys
+import types
 import warnings
 from contextlib import contextmanager
 
 __all__ = [
     "OTEL_PYTHON_EVENTLET_MONKEY_PATCH",
     "OTEL_PYTHON_OSLO_SERVICE_BACKEND",
-    "reset_hub_on_fork",
+    "register_forkhook",
     "try_patch",
-    "wrap_initialize",
+    "unpatch_sdk",
 ]
 
 #: Opt-in flag: when ``"true"`` (case-insensitive), eventlet is monkey-patched.
@@ -20,31 +21,32 @@ OTEL_PYTHON_EVENTLET_MONKEY_PATCH = "OTEL_PYTHON_EVENTLET_MONKEY_PATCH"
 OTEL_PYTHON_OSLO_SERVICE_BACKEND = "OTEL_PYTHON_OSLO_SERVICE_BACKEND"
 
 #: ``os.register_at_fork`` cannot be undone, so the handler goes on once.
-_hub_reset_installed = False
+_forkhook_installed = False
+
+#: Names ``opentelemetry.sdk.metrics._internal.export`` imports from
+#: :mod:`threading`; ``_shared_internal`` reaches them through the module.
+_SDK_THREAD_NAMES = ("Event", "Lock", "RLock", "Thread")
 
 
-def reset_hub_on_fork() -> bool:
+def register_forkhook() -> bool:
     """Give every forked child a fresh eventlet hub.
 
-    A child inherits a copy of the parent's hub, greenlets included. Among them
-    are threads still waiting to start -- under eventlet ``Thread.start()`` only
-    schedules a hub timer -- and the child's ``threading._after_fork()`` clears
-    ``threading._limbo`` out from under them, so each one bootstraps into
-    ``KeyError: <Timer(Thread-18, stopped daemon ...)>`` and dies. Any library's
-    threads, whichever were mid-start at fork time.
+    A child inherits a copy of the parent's hub, greenlets included, and among
+    them are threads still waiting to start: under eventlet ``Thread.start()``
+    only schedules a hub timer. The child's ``threading._after_fork()`` then
+    clears ``threading._limbo`` out from under them, so each one bootstraps into
+    ``KeyError: <Timer(Thread-18, stopped daemon ...)>`` and dies. It hits
+    whichever threads were mid-start, in any library.
 
     Dropping the hub drops those timers with it. Keeping them would be worse:
     the parent's in-flight greenlets would run twice, in two processes, over
-    shared sockets. oslo.service does the same in
-    ``ProcessLauncher._child_process``; this covers every fork, and runs early
-    enough to beat the handlers that start threads -- ``after_in_child``
-    callbacks fire in registration order.
+    shared sockets.
 
     :returns: ``True`` if the handler is installed, now or by an earlier call.
     """
-    global _hub_reset_installed
+    global _forkhook_installed
 
-    if _hub_reset_installed:
+    if _forkhook_installed:
         return True
     if not hasattr(os, "register_at_fork"):  # pragma: no cover - POSIX only
         return False
@@ -61,8 +63,67 @@ def reset_hub_on_fork() -> bool:
             pass
 
     os.register_at_fork(after_in_child=_fresh_hub)
-    _hub_reset_installed = True
+    _forkhook_installed = True
     return True
+
+
+def _unpatched_threading():
+    """The real :mod:`threading`, or ``None`` if eventlet cannot supply it.
+
+    A mocked eventlet returns a ``Mock``; writing that into the SDK would break
+    every exporter, so anything that is not a module is refused.
+    """
+    try:
+        from eventlet import patcher  # noqa: PLC0415
+
+        real = patcher.original("threading")
+    except Exception:  # noqa: BLE001 - no eventlet, nothing to keep apart
+        return None
+    return real if isinstance(real, types.ModuleType) else None
+
+
+def unpatch_sdk() -> bool:
+    """Keep the SDK's exporter threads off eventlet's primitives.
+
+    ``BatchProcessor`` (behind the batch span and log processors) and
+    ``PeriodicExportingMetricReader`` each own a worker thread that every other
+    thread signals through a shared ``Event``. Green, that raises
+    ``greenlet.error: cannot switch to a different thread`` as soon as the
+    signalling thread is not the worker's own: ``Event.set()`` schedules on the
+    caller's hub, which cannot switch to a greenlet from another thread. Under
+    mod_wsgi that is every request, since Apache dispatches each one on a real
+    thread of its own.
+
+    Rebinding these modules to the unpatched :mod:`threading` keeps the worker
+    and everything signalling it in the real-thread world, where no hub is
+    involved.
+
+    :returns: ``True`` if at least one module was rebound.
+    """
+    real = _unpatched_threading()
+    if real is None:
+        return False
+
+    rebindings = {
+        # Reached as ``threading.Thread`` / ``.Lock`` / ``.Event``.
+        "opentelemetry.sdk._shared_internal": {"threading": real},
+        # Imported by name at module level.
+        "opentelemetry.sdk.metrics._internal.export": {
+            name: getattr(real, name) for name in _SDK_THREAD_NAMES
+        },
+    }
+
+    rebound = False
+    for module_name, attributes in rebindings.items():
+        try:
+            __import__(module_name)
+        except ImportError:
+            continue  # a trimmed artifact need not ship every signal
+        module = sys.modules[module_name]
+        for name, value in attributes.items():
+            setattr(module, name, value)
+        rebound = True
+    return rebound
 
 
 @contextmanager
@@ -70,7 +131,7 @@ def _strip_path():
     """Hide this directory from ``PYTHONPATH`` for the duration.
 
     Anything spawned while it is visible re-runs auto-instrumentation, which
-    spawns again -- so keep it out over the calls that may fork.
+    spawns again.
     """
     this_dir = os.path.dirname(os.path.abspath(__file__))
     original = os.environ.get("PYTHONPATH")
@@ -93,8 +154,8 @@ def try_patch() -> None:
     """Monkey-patch eventlet when opted in, and pin the oslo.service backend.
 
     No-op unless ``OTEL_PYTHON_EVENTLET_MONKEY_PATCH`` is ``"true"``. A missing
-    eventlet is surfaced with :func:`warnings.warn`, not the module logger: this
-    runs before logging is configured.
+    eventlet is surfaced with :func:`warnings.warn`, not the module logger:
+    this runs before logging is configured.
 
     :returns: ``None``.
     """
@@ -106,12 +167,6 @@ def try_patch() -> None:
         try:
             eventlet = __import__("eventlet")
             eventlet.monkey_patch()
-            # Forced, not setdefault: a stale value would re-introduce the
-            # fork/socket mismatch the patch prevents.
-            os.environ[OTEL_PYTHON_OSLO_SERVICE_BACKEND] = "eventlet"
-            # Earliest point available, so this precedes every other
-            # after_in_child callback that starts a thread.
-            reset_hub_on_fork()
         except ImportError:
             warnings.warn(
                 f"{OTEL_PYTHON_EVENTLET_MONKEY_PATCH} is set to true, but "
@@ -119,22 +174,14 @@ def try_patch() -> None:
                 "monkey-patching.",
                 stacklevel=2,
             )
+            return
 
-
-def wrap_initialize(auto_instrumentation_module) -> None:
-    """Fold :func:`try_patch` into ``auto_instrumentation_module._initialize``.
-
-    Keeps the patch applied when ``initialize()`` is called again, re-entrantly
-    or by application code.
-
-    :param auto_instrumentation_module: the already-imported
-        ``opentelemetry.instrumentation.auto_instrumentation`` module.
-    :returns: ``None``.
-    """
-    original = auto_instrumentation_module._initialize
-
-    def _initialize_with_eventlet_patch(*args, **kwargs):
-        try_patch()
-        return original(*args, **kwargs)
-
-    auto_instrumentation_module._initialize = _initialize_with_eventlet_patch
+        # Forced, not setdefault: a stale value would re-introduce the
+        # fork/socket mismatch the patch prevents.
+        os.environ[OTEL_PYTHON_OSLO_SERVICE_BACKEND] = "eventlet"
+        # Both only make sense once something is green, and both must precede
+        # ``initialize()`` building the span processors and registering their
+        # fork handlers. ``unpatch_sdk`` imports the SDK, so it has to follow
+        # the patch rather than lead it.
+        register_forkhook()
+        unpatch_sdk()
