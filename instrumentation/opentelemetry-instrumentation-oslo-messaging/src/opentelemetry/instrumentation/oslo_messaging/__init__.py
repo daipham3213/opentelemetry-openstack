@@ -28,6 +28,24 @@ producer, extracting context from the incoming message:
 
 Message payloads are never recorded as span attributes.
 
+Span attributes follow the conventions oslo.messaging's own built-in tracing
+established (added upstream in ``oslo_messaging/_tracing``), so a trace reads
+the same whichever emitter produced a span: ``messaging.operation`` is the call
+style (``call``/``cast``/``send``) or ``receive``, ``messaging.destination.name``
+is the target topic, ``rpc.method`` is the bare method with the namespace in
+``rpc.service``, and the OpenStack request id is recorded as
+``openstack.request_id``. Two things deliberately differ: ``messaging.system``
+is derived from the configured ``transport_url`` rather than hardcoded to
+``rabbitmq``, and ``rpc.system`` is recorded as ``oslo.messaging``.
+
+.. warning::
+
+   Do not enable this instrumentor *and* oslo.messaging's built-in tracing
+   (``[oslo_messaging_tracing] tracing_enabled = true``) at the same time. They
+   wrap different layers -- the RPC client/server versus the transport and
+   dispatchers -- so both fire and every message gets a duplicate pair of
+   producer and consumer spans.
+
 **Trace continuity across concurrency.** Keeping a consumer's trace on work it
 hands to a greenthread or worker thread (as nova-compute's
 ``build_and_run_instance`` does right after dispatch) is the job of

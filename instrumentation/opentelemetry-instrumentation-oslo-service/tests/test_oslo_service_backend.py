@@ -27,7 +27,10 @@ def reset_backend():
 
 
 def test_pre_instrument_selects_threading_by_default():
-    pytest.importorskip("cotyledon")  # the threading backend's runtime dep
+    # Both are runtime deps of the threading backend; without either,
+    # oslo.service reports a misleading "backend module not found".
+    pytest.importorskip("cotyledon")
+    pytest.importorskip("futurist")
     assert backend.get_backend_type() is None
     _pre_instrument()
     assert backend.get_backend_type() is BackendType.THREADING

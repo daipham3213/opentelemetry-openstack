@@ -3,11 +3,20 @@
 import os
 
 from opentelemetry.distro import OpenTelemetryConfigurator, OpenTelemetryDistro
+from opentelemetry.sdk.environment_variables import OTEL_EXPORTER_OTLP_PROTOCOL
 
 __all__ = [
     "OsloServiceConfigurator",
     "OsloServiceDistro",
 ]
+
+#: OTLP protocol this distro defaults to. The upstream distro defaults to
+#: ``grpc``, whose exporter is deliberately not shipped in the
+#: auto-instrumentation artifact (gRPC has a strict dependency on the OS and
+#: Python version the artifact is built for). Left at the upstream default, the
+#: SDK asks for an ``otlp_proto_grpc`` exporter that is not installed, fails to
+#: configure, and the process exports nothing at all.
+DEFAULT_OTLP_PROTOCOL = "http/protobuf"
 
 
 class OsloServiceConfigurator(OpenTelemetryConfigurator):
@@ -37,12 +46,21 @@ class OsloServiceDistro(OpenTelemetryDistro):
     """
 
     def _configure(self, **kwargs: object) -> None:
-        """Patch eventlet, run standard distro config, then pin the configurator.
+        """Default the OTLP protocol, run distro config, pin the configurator.
+
+        The protocol default is set *before* ``super()._configure()`` because
+        that also uses ``setdefault`` -- whichever runs first wins. An operator
+        who has installed the gRPC exporter and set
+        ``OTEL_EXPORTER_OTLP_PROTOCOL`` explicitly still gets their choice.
 
         :param kwargs: Forwarded verbatim to
             :meth:`OpenTelemetryDistro._configure`.
         :returns: ``None``.
         """
+        os.environ.setdefault(
+            OTEL_EXPORTER_OTLP_PROTOCOL, DEFAULT_OTLP_PROTOCOL
+        )
+
         super()._configure(**kwargs)
 
         # Ensure this distro's own configurator (which patches defensively too)

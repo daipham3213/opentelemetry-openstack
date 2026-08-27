@@ -8,7 +8,9 @@ underlying send so no real broker is required.
 
 from types import SimpleNamespace
 
+import oslo_messaging
 import pytest
+from oslo_config import cfg
 from oslo_messaging.transport import Transport
 
 from opentelemetry.instrumentation.oslo_messaging import (
@@ -195,3 +197,150 @@ def test_uninstrument_restores_send(transport, instrumentor, tracer):
         transport._send(target, ctxt, {"method": "do_thing"})
 
     assert "traceparent" not in sent["ctxt"]
+
+
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        ("rabbit://host:5672//", "rabbitmq"),
+        ("kombu://host:5672//", "rabbitmq"),  # entry-point alias for rabbit
+        ("rabbit+ssl://host:5671//", "rabbitmq"),  # compound scheme
+        ("fake:/", "fake"),  # no conventional value; names itself
+    ],
+)
+def test_send_records_configured_broker_as_messaging_system(
+    transport, instrumentor, span_exporter, url, expected
+):
+    # messaging.system is the broker, read from the transport this send is
+    # going out on -- so a service whose notifications use a different
+    # transport_url than its RPC reports each correctly.
+    _, _sent = transport
+    configured = oslo_messaging.get_rpc_transport(cfg.ConfigOpts(), url=url)
+
+    configured._send(
+        SimpleNamespace(topic="topic"), {}, {"method": "do_thing"}
+    )
+
+    span = span_exporter.get_finished_spans()[0]
+    assert span.attributes["messaging.system"] == expected
+    # rpc.system is the RPC system, which is oslo.messaging regardless.
+    assert span.attributes["rpc.system"] == "oslo.messaging"
+
+
+def test_send_notification_records_configured_broker(
+    transport, instrumentor, span_exporter
+):
+    _, _sent = transport
+    configured = oslo_messaging.get_notification_transport(
+        cfg.ConfigOpts(), url="rabbit://host:5672//"
+    )
+
+    configured._send_notification(
+        SimpleNamespace(topic="topic"), {}, {"event_type": "some.event"}, "2.0"
+    )
+
+    span = span_exporter.get_finished_spans()[0]
+    assert span.attributes["messaging.system"] == "rabbitmq"
+
+
+def test_messaging_system_falls_back_when_driver_is_unknown(
+    transport, instrumentor, span_exporter
+):
+    # A transport with no resolvable driver must still carry the attribute.
+    driverless, _sent = transport
+
+    driverless._send(
+        SimpleNamespace(topic="topic"), {}, {"method": "do_thing"}
+    )
+
+    span = span_exporter.get_finished_spans()[0]
+    assert span.attributes["messaging.system"] == "oslo.messaging"
+
+
+@pytest.mark.parametrize(
+    "kwargs,expected",
+    [
+        ({"wait_for_reply": True}, "call"),
+        ({}, "cast"),
+        ({"wait_for_reply": None}, "cast"),
+    ],
+)
+def test_send_records_call_style_as_messaging_operation(
+    transport, instrumentor, span_exporter, kwargs, expected
+):
+    # wait_for_reply is what distinguishes an RPC call from a cast, and the
+    # call style is what oslo.messaging's own tracing puts on the span.
+    sender, _sent = transport
+
+    sender._send(
+        SimpleNamespace(topic="topic"), {}, {"method": "do_thing"}, **kwargs
+    )
+
+    span = span_exporter.get_finished_spans()[0]
+    assert span.attributes["messaging.operation"] == expected
+    assert span.attributes["messaging.operation.name"] == expected
+
+
+def test_send_notification_records_send_as_messaging_operation(
+    transport, instrumentor, span_exporter
+):
+    # A notification is neither a call nor a cast.
+    sender, _sent = transport
+
+    sender._send_notification(
+        SimpleNamespace(topic="topic"), {}, {"event_type": "some.event"}, "2.0"
+    )
+
+    span = span_exporter.get_finished_spans()[0]
+    assert span.attributes["messaging.operation"] == "send"
+
+
+def test_send_records_topic_as_destination_and_exchange_separately(
+    transport, instrumentor, span_exporter
+):
+    # The topic is where the message routes -- and what oslo.messaging's own
+    # tracing reports. The exchange scopes it and has no conventional name.
+    sender, _sent = transport
+    target = SimpleNamespace(topic="compute", exchange="openstack")
+
+    sender._send(target, {}, {"method": "do_thing"})
+
+    span = span_exporter.get_finished_spans()[0]
+    assert span.attributes["messaging.destination.name"] == "compute"
+    assert span.attributes["oslo_messaging.target.exchange"] == "openstack"
+    # destination.template is a low-cardinality *string* in the conventions,
+    # so it must not be set to a boolean.
+    assert "messaging.destination.template" not in span.attributes
+
+
+def test_send_splits_namespace_into_rpc_service(
+    transport, instrumentor, span_exporter
+):
+    sender, _sent = transport
+
+    sender._send(
+        SimpleNamespace(topic="topic"),
+        {},
+        {"method": "do_thing", "namespace": "baremetal"},
+    )
+
+    span = span_exporter.get_finished_spans()[0]
+    assert span.name == "baremetal.do_thing send"
+    assert span.attributes["rpc.method"] == "do_thing"
+    assert span.attributes["rpc.service"] == "baremetal"
+
+
+def test_send_records_openstack_request_id(
+    transport, instrumentor, span_exporter
+):
+    sender, _sent = transport
+
+    sender._send(
+        SimpleNamespace(topic="topic"),
+        {"request_id": "req-abc"},
+        {"method": "do_thing"},
+    )
+
+    span = span_exporter.get_finished_spans()[0]
+    assert span.attributes["openstack.request_id"] == "req-abc"
+    assert span.attributes["messaging.message.conversation_id"] == "req-abc"
