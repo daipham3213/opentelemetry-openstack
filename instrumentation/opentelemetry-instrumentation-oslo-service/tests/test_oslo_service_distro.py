@@ -116,8 +116,14 @@ _AUTO_INSTRUMENTATION_DIR = (
 )
 
 
-def _run_sitecustomize(env_overrides):
-    """Import ``sitecustomize`` in a fresh interpreter and report the env.
+#: Both follow-ups ride on the monkey-patch opt-in.
+_OPTED_IN = {"OTEL_PYTHON_EVENTLET_MONKEY_PATCH": "true"}
+
+_REPORT_DISTRO = "import os; print(os.environ['OTEL_PYTHON_DISTRO'])"
+
+
+def _run_sitecustomize(env_overrides, code=_REPORT_DISTRO):
+    """Run ``code`` in a fresh interpreter with ``sitecustomize`` active.
 
     ``sitecustomize`` configures the SDK at import, so it cannot be imported
     into the test process; a subprocess is the only honest way to exercise it.
@@ -134,11 +140,7 @@ def _run_sitecustomize(env_overrides):
     env.pop("OTEL_PYTHON_DISTRO", None)
     env.update(env_overrides)
     completed = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import os; print(os.environ['OTEL_PYTHON_DISTRO'])",
-        ],
+        [sys.executable, "-c", code],
         env=env,
         capture_output=True,
         text=True,
@@ -158,3 +160,31 @@ def test_sitecustomize_selects_this_distro():
 
 def test_sitecustomize_respects_an_explicit_distro():
     assert _run_sitecustomize({"OTEL_PYTHON_DISTRO": "distro"}) == "distro"
+
+
+def test_sitecustomize_gives_the_sdk_real_threads():
+    """The SDK's exporter worker is signalled by whichever thread ends a span.
+
+    Under mod_wsgi that is a different real thread every request, and a green
+    Event signalled from a foreign thread raises ``greenlet.error: cannot
+    switch to a different thread``. sitecustomize has to rebind the module
+    before ``initialize()`` builds the processors.
+    """
+    reported = _run_sitecustomize(
+        _OPTED_IN,
+        "import sys\n"
+        "from eventlet import patcher\n"
+        "module = sys.modules['opentelemetry.sdk._shared_internal']\n"
+        "print(module.threading is patcher.original('threading'))\n",
+    )
+    assert reported == "True"
+
+
+def test_sitecustomize_registers_the_fork_hub_reset():
+    """Forked children must not inherit the parent's hub; see
+    ``_oslo_service_eventlet.register_forkhook``."""
+    reported = _run_sitecustomize(
+        _OPTED_IN,
+        "import _oslo_service_eventlet as m\nprint(m._forkhook_installed)\n",
+    )
+    assert reported == "True"
