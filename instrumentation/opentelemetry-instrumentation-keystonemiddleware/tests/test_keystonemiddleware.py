@@ -6,6 +6,10 @@ from keystonemiddleware.auth_token._request import _AuthTokenRequest
 from opentelemetry.instrumentation.keystonemiddleware import (
     KeystoneMiddlewareInstrumentor,
 )
+from opentelemetry.instrumentation.propagators import (
+    TraceResponsePropagator,
+    set_global_response_propagator,
+)
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
@@ -99,8 +103,10 @@ def _wsgi_call(service, path="/v3/servers", **headers):
 
     def start_response(status, response_headers, exc_info=None):
         captured["status"] = status
+        captured["headers"] = dict(response_headers)
 
     body = b"".join(service(environ, start_response))
+    _wsgi_call.headers = captured.get("headers")
     return captured.get("status"), body
 
 
@@ -385,3 +391,62 @@ def test_uninstrument_restores_call(instrument, span_exporter):
     assert status == "200 OK"
     assert body == b"{}"
     assert span_exporter.get_finished_spans() == ()
+
+
+def test_call_returns_trace_id_header(instrument, span_exporter):
+    service = _WsgiService(_token_body())
+
+    _wsgi_call(service, **{"X-Auth-Token": "TOKENID"})
+
+    request = {s.name: s for s in span_exporter.get_finished_spans()}[
+        "GET /v3/servers"
+    ]
+    assert _wsgi_call.headers["X-Trace-ID"] == format(
+        request.context.trace_id, "032x"
+    )
+    assert _wsgi_call.headers["Content-Type"] == "application/json"
+
+
+def test_call_error_response_returns_trace_id_header(instrument):
+    service = _WsgiService(_token_body(), status="500 Internal Server Error")
+
+    _wsgi_call(service, **{"X-Auth-Token": "TOKENID"})
+
+    assert len(_wsgi_call.headers["X-Trace-ID"]) == 32
+
+
+def test_call_keeps_existing_trace_id_header(instrument):
+    service = _WsgiService(_token_body())
+
+    def app(environ, start_response):
+        start_response("200 OK", [("x-trace-id", "upstream")])
+        return [b""]
+
+    service._app = app
+
+    _wsgi_call(service, **{"X-Auth-Token": "TOKENID"})
+
+    assert _wsgi_call.headers == {"x-trace-id": "upstream"}
+
+
+def test_call_injects_global_response_propagator(instrument, span_exporter):
+    set_global_response_propagator(TraceResponsePropagator())
+    try:
+        _wsgi_call(_WsgiService(_token_body()), **{"X-Auth-Token": "TOKENID"})
+    finally:
+        set_global_response_propagator(None)
+
+    request = {s.name: s for s in span_exporter.get_finished_spans()}[
+        "GET /v3/servers"
+    ]
+    ctx = request.context
+    assert _wsgi_call.headers["traceresponse"] == (
+        f"00-{ctx.trace_id:032x}-{ctx.span_id:016x}-{ctx.trace_flags:02x}"
+    )
+    assert _wsgi_call.headers["X-Trace-ID"] == f"{ctx.trace_id:032x}"
+
+
+def test_call_no_traceresponse_by_default(instrument):
+    _wsgi_call(_WsgiService(_token_body()), **{"X-Auth-Token": "TOKENID"})
+
+    assert "traceresponse" not in _wsgi_call.headers

@@ -20,6 +20,22 @@ instrumentor extracts the W3C trace context from the incoming headers and opens 
 OpenStack SDK) carries on into the service. When a span is already active the
 authentication span is nested under it as `INTERNAL`.
 
+Every response carries the request's trace id in an `X-Trace-ID` header (32 hex
+chars), so a caller can quote it when reporting a failed request. A header of
+that name already set by the service is left untouched.
+
+The W3C `traceresponse` header is opt-in, as in the upstream web-framework
+instrumentors:
+
+```python
+from opentelemetry.instrumentation.propagators import (
+    TraceResponsePropagator,
+    set_global_response_propagator,
+)
+
+set_global_response_propagator(TraceResponsePropagator())
+```
+
 ## Installation
 
 ```bash
