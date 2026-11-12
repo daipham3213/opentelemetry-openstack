@@ -67,15 +67,19 @@ class OsloLogHandler(LoggingHandler):
         super().__init__(*args, **kwargs)
         self._map_oslo_context = map_oslo_context
 
-    def _get_attributes(self, record: logging.LogRecord) -> dict:
-        attributes = super()._get_attributes(record)
+    def _get_attributes(self, record: logging.LogRecord) -> Any:
+        # opentelemetry-instrumentation-logging >= 0.66b2 returns
+        # ``(attributes, event_name)``; older releases return the dict alone.
+        # The dict is edited in place, so the base's shape is returned as-is.
+        result = super()._get_attributes(record)
+        attributes = result[0] if isinstance(result, tuple) else result
         # The base handler copies the raw RequestContext object and oslo's
         # bookkeeping key verbatim; drop them for the mapped fields instead.
         attributes.pop("context", None)
         attributes.pop("extra_keys", None)
         if self._map_oslo_context:
             attributes.update(self._oslo_context_attributes(record))
-        return attributes
+        return result
 
     def _oslo_context_attributes(self, record: logging.LogRecord) -> dict:
         context = getattr(record, "context", None)

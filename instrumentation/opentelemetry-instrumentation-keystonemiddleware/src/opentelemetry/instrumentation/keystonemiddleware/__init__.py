@@ -25,7 +25,10 @@ W3C trace context is extracted from the incoming request headers, so a trace
 started by an instrumented client (the OpenStack SDK / keystoneauth1) carries on
 into the service. If a span is already active -- e.g. an upstream WSGI/framework
 instrumentor already opened the server span -- the request span nests under it as
-``INTERNAL`` rather than opening a second server span.
+``INTERNAL`` rather than opening a second server span. The request's trace id
+is echoed back in an ``X-Trace-ID`` response header so a caller can quote it
+when reporting a problem; a global response propagator, if set (see
+``opentelemetry.instrumentation.propagators``), adds its headers too.
 
 **The authenticate span.** ``BaseAuthProtocol.process_request`` is the method
 both the stock ``AuthProtocol`` and any subclass call to do the actual token
@@ -61,6 +64,10 @@ from opentelemetry.instrumentation.instrumentor import BaseInstrumentor
 from opentelemetry.instrumentation.keystonemiddleware.version import (
     __version__,
 )
+from opentelemetry.instrumentation.propagators import (
+    FuncSetter,
+    get_global_response_propagator,
+)
 from opentelemetry.instrumentation.utils import (
     is_instrumentation_enabled,
     unwrap,
@@ -72,7 +79,13 @@ from opentelemetry.semconv.attributes import (
     server_attributes,
     url_attributes,
 )
-from opentelemetry.trace import Span, SpanKind, Tracer, TracerProvider
+from opentelemetry.trace import (
+    Span,
+    SpanKind,
+    Tracer,
+    TracerProvider,
+    format_trace_id,
+)
 from opentelemetry.trace.status import Status, StatusCode
 from opentelemetry.util.types import Attributes
 
@@ -89,6 +102,13 @@ _PROCESS_REQUEST: str = "process_request"
 _CALL: str = "__call__"
 _SPAN_NAME: str = "keystonemiddleware.authenticate"
 _REQUEST_SPAN_NAME: str = "keystonemiddleware.request"
+# Response header exposing the request's trace id to the caller.
+_TRACE_ID_HEADER: str = "X-Trace-ID"
+# Appends to a WSGI ``[(name, value), ...]`` header list, for the opt-in
+# response propagator (e.g. W3C ``traceresponse``).
+_HEADER_LIST_SETTER = FuncSetter(
+    lambda headers, key, value: headers.append((key, value))
+)
 
 # Whether the request carried a user / service token, and whether the middleware
 # accepted it. These live outside the semantic conventions because token
@@ -412,6 +432,9 @@ def _call_wrapper(tracer: Tracer) -> Wrapper:
     span the service's handler creates while serving it nests under the same
     trace. The span continues an inbound distributed trace extracted from the
     request headers, and records basic HTTP attributes plus the response status.
+    The trace id is returned to the caller in an ``X-Trace-ID`` response header,
+    plus whatever the global response propagator adds (e.g. ``traceresponse``),
+    if one is set.
 
     Args:
         tracer: The tracer used to create the request span.
@@ -445,6 +468,14 @@ def _call_wrapper(tracer: Tracer) -> Wrapper:
 
             def traced_start_response(status, headers, exc_info=None):
                 captured["status"] = status
+                headers = list(_with_trace_id(headers, span))
+                propagator = get_global_response_propagator()
+                if propagator:
+                    propagator.inject(
+                        headers,
+                        context=trace.set_span_in_context(span),
+                        setter=_HEADER_LIST_SETTER,
+                    )
                 return start_response(status, headers, exc_info)
 
             try:
@@ -459,6 +490,22 @@ def _call_wrapper(tracer: Tracer) -> Wrapper:
             return result
 
     return wrapper
+
+
+def _with_trace_id(headers: Any, span: Span) -> Any:
+    """Return ``headers`` plus an ``X-Trace-ID`` carrying the span's trace id.
+
+    Lets a caller quote the id when reporting a failed request, so the
+    trace can be looked up directly. Left alone when the span context is
+    invalid or a header of that name is already set (by the service itself,
+    or a second ``auth_token`` further down the pipeline).
+    """
+    ctx = span.get_span_context()
+    if not ctx.is_valid or any(
+        name.lower() == _TRACE_ID_HEADER.lower() for name, _ in headers
+    ):
+        return headers
+    return list(headers) + [(_TRACE_ID_HEADER, format_trace_id(ctx.trace_id))]
 
 
 def _record_status(span: Span, status_line: Any) -> None:
